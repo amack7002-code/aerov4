@@ -1,3 +1,4 @@
+--This watermark is used to delete the file if its cached, remove it to make the file persist after vape updates.
 local mainapi = {
 	Categories = {},
 	GUIColor = {
@@ -1699,7 +1700,6 @@ mainapi.TagDisplay = {
 mainapi.ModuleAliases = {
     Wizard = {"Zeno"},
     Killaura = {"ka"},
-    GrandKillaura = {"grandka"},
     ProjectileAimAssist = {"pa"},
     Spider_Queen = {"arachne"},
     Necromancer = {"crypt"},
@@ -5175,39 +5175,267 @@ function mainapi:CreateCategory(categorysettings)
 		moduleapi.Pinned = false
 		moduleapi.FavoriteButton = nil
 
-		local function togglePin()
+		local favbutton
+		local favchildren
+		local favconns = {}
+		local favpairs = {}
+		local optionLog = {}
+		local togglePin
+
+		local function childrenHome()
+			if modulechildren.Parent ~= children then
+				modulechildren.Visible = false
+				modulechildren.Parent = children
+				modulechildren.LayoutOrder = modulebutton.LayoutOrder
+			end
+		end
+
+		local function toggleHomeChildren()
+			if modulechildren.Parent ~= children then
+				childrenHome()
+				modulechildren.Visible = true
+				return
+			end
+			modulechildren.Visible = not modulechildren.Visible
+		end
+
+		local function sortFavorites()
+			local favs = {}
+			for _, v in mainapi.Modules do
+				if v.Pinned and v.FavoriteButton then
+					table.insert(favs, v)
+				end
+			end
+			table.sort(favs, function(x, y)
+				return x.Name < y.Name
+			end)
+			for i, v in favs do
+				v.FavoriteButton.LayoutOrder = i * 2
+				if v.FavoriteChildren then
+					v.FavoriteChildren.LayoutOrder = i * 2 + 1
+				end
+			end
+		end
+
+		local function snapshot(option)
+			local tab = {}
+			local ok = pcall(function()
+				option:Save(tab)
+			end)
+			if not ok then return nil, nil end
+			local _, value = next(tab)
+			local encoded
+			local okEncode = pcall(function()
+				encoded = httpService:JSONEncode(value)
+			end)
+			if not okEncode then
+				encoded = tostring(value)
+			end
+			return value, encoded
+		end
+
+		local function syncPairs()
+			for _, pair in favpairs do
+				local primary, copy = pair.Primary, pair.Copy
+				if primary.Object and copy.Object then
+					copy.Object.Visible = primary.Object.Visible
+				end
+				if primary.Save and copy.Save and primary.Load and copy.Load then
+					local pValue, pKey = snapshot(primary)
+					local cValue, cKey = snapshot(copy)
+					if pKey and cKey then
+						if pKey ~= pair.Last then
+							pcall(function() copy:Load(pValue) end)
+							pair.Last = pKey
+						elseif cKey ~= pair.Last then
+							pcall(function() primary:Load(cValue) end)
+							pair.Last = cKey
+						end
+					end
+				end
+			end
+		end
+
+		local function buildFavChildren(favcat)
+			favchildren = Instance.new('Frame')
+			favchildren.Name = modulesettings.Name..'FavChildren'
+			favchildren.Size = UDim2.new(1, 0, 0, 0)
+			favchildren.BackgroundColor3 = modulechildren.BackgroundColor3
+			favchildren.BorderSizePixel = 0
+			favchildren.Visible = false
+			favchildren.LayoutOrder = favbutton.LayoutOrder + 1
+			favchildren.Parent = favcat.Children
+			moduleapi.FavoriteChildren = favchildren
+			local favlist = Instance.new('UIListLayout')
+			favlist.SortOrder = Enum.SortOrder.LayoutOrder
+			favlist.HorizontalAlignment = Enum.HorizontalAlignment.Center
+			favlist.Parent = favchildren
+			table.insert(favconns, favlist:GetPropertyChangedSignal('AbsoluteContentSize'):Connect(function()
+				if mainapi.ThreadFix then
+					setthreadidentity(8)
+				end
+				favchildren.Size = UDim2.new(1, 0, 0, favlist.AbsoluteContentSize.Y / scale.Scale)
+			end))
+
+			local proxy = setmetatable({Options = {}}, {__index = moduleapi})
+			for _, entry in optionLog do
+				local kind, settings, primary = entry[1], entry[2], entry[3]
+				local copySettings = type(settings) == 'table' and table.clone(settings) or settings
+				if type(copySettings) == 'table' and kind ~= 'Button' then
+					copySettings.Function = function() end
+				end
+				local ok, copy = pcall(components[kind], copySettings, favchildren, proxy)
+				if ok and type(copy) == 'table' and type(primary) == 'table' then
+					table.insert(favpairs, {Primary = primary, Copy = copy})
+				end
+			end
+			syncPairs()
+
+			task.spawn(function()
+				while favchildren and favchildren.Parent do
+					if favchildren.Visible then
+						syncPairs()
+					end
+					task.wait(0.1)
+				end
+			end)
+		end
+
+		local function removeFavorite()
+			for _, conn in favconns do
+				pcall(function() conn:Disconnect() end)
+			end
+			table.clear(favconns)
+			table.clear(favpairs)
+			childrenHome()
+			if favchildren then
+				favchildren:Destroy()
+				favchildren = nil
+			end
+			if favbutton then
+				favbutton:Destroy()
+				favbutton = nil
+			end
+			moduleapi.FavoriteButton = nil
+			moduleapi.FavoriteChildren = nil
+		end
+
+		local function makeFavorite()
+			local favcat = mainapi.Categories.Favorites
+			if not favcat or not favcat.Children then return end
+			removeFavorite()
+
+			favbutton = modulebutton:Clone()
+			for _, name in {'Bind', 'Cover', 'ResetCover'} do
+				local obj = favbutton:FindFirstChild(name)
+				if obj then obj:Destroy() end
+			end
+			favbutton.Parent = favcat.Children
+			moduleapi.FavoriteButton = favbutton
+			addTooltip(favbutton, modulesettings.Tooltip or modulesettings.Name)
+
+			local favgradient = favbutton:FindFirstChildOfClass('UIGradient')
+			local favdivider = favbutton:FindFirstChild('Divider')
+			local favdotsbutton = favbutton:FindFirstChild('Dots')
+			local favdots = favdotsbutton and favdotsbutton:FindFirstChild('Dots')
+			local favpin = favbutton:FindFirstChild('Favorite')
+			local favpinicon = favpin and favpin:FindFirstChild('Icon')
+			local favhover = false
+			local homedivider = modulebutton:FindFirstChild('Divider')
+			local homedotsbutton = modulebutton:FindFirstChild('Dots')
+			local homedots = homedotsbutton and homedotsbutton:FindFirstChild('Dots')
+
+			local function sync()
+				if not favbutton then return end
+				if favgradient then
+					favgradient.Enabled = gradient.Enabled
+					favgradient.Color = gradient.Color
+				end
+				if favdivider and homedivider then
+					favdivider.Visible = homedivider.Visible
+				end
+				if moduleapi.Enabled then
+					favbutton.TextColor3 = modulebutton.TextColor3
+					favbutton.BackgroundColor3 = modulebutton.BackgroundColor3
+					if favdots and homedots then
+						favdots.ImageColor3 = homedots.ImageColor3
+					end
+				else
+					local lit = favhover or (favchildren and favchildren.Visible)
+					favbutton.TextColor3 = lit and uipallet.Text or color.Dark(uipallet.Text, 0.16)
+					favbutton.BackgroundColor3 = lit and color.Light(uipallet.Main, 0.02) or uipallet.Main
+					if favdots then
+						favdots.ImageColor3 = color.Light(uipallet.Main, 0.37)
+					end
+				end
+				if favpin then
+					favpin.Visible = true
+				end
+				if favpinicon then
+					favpinicon.ImageColor3 = moduleapi.Enabled and favbutton.TextColor3 or uipallet.Text
+				end
+			end
+
+			local function toggleFavChildren()
+				if not favchildren then
+					buildFavChildren(favcat)
+				end
+				favchildren.LayoutOrder = favbutton.LayoutOrder + 1
+				if not favchildren.Visible then
+					syncPairs()
+				end
+				favchildren.Visible = not favchildren.Visible
+				sync()
+			end
+
+			table.insert(favconns, gradient:GetPropertyChangedSignal('Enabled'):Connect(sync))
+			table.insert(favconns, gradient:GetPropertyChangedSignal('Color'):Connect(sync))
+			table.insert(favconns, modulebutton:GetPropertyChangedSignal('BackgroundColor3'):Connect(sync))
+			table.insert(favconns, modulebutton:GetPropertyChangedSignal('TextColor3'):Connect(sync))
+			if homedivider then
+				table.insert(favconns, homedivider:GetPropertyChangedSignal('Visible'):Connect(sync))
+			end
+			if homedots then
+				table.insert(favconns, homedots:GetPropertyChangedSignal('ImageColor3'):Connect(sync))
+			end
+
+			favbutton.MouseEnter:Connect(function()
+				favhover = true
+				sync()
+			end)
+			favbutton.MouseLeave:Connect(function()
+				favhover = false
+				sync()
+			end)
+			favbutton.MouseButton1Click:Connect(function()
+				if not mobileEditorOpen then
+					moduleapi:Toggle()
+				end
+				task.defer(sync)
+			end)
+			favbutton.MouseButton2Click:Connect(toggleFavChildren)
+			if favdotsbutton then
+				favdotsbutton.MouseButton1Click:Connect(toggleFavChildren)
+			end
+			if favpin then
+				addTooltip(favpin, 'take it outta favorites')
+				favpin.MouseButton1Click:Connect(function()
+					togglePin()
+				end)
+			end
+
+			sync()
+		end
+
+		togglePin = function()
 			moduleapi.Pinned = not moduleapi.Pinned
 			pinicon.ImageColor3 = moduleapi.Pinned and uipallet.Text or color.Dark(uipallet.Text, 0.43)
-
 			if moduleapi.Pinned then
-				if mainapi.Categories.Favorites and mainapi.Categories.Favorites.Children then
-					modulebutton.Parent = mainapi.Categories.Favorites.Children
-					modulechildren.Parent = mainapi.Categories.Favorites.Children
-				end
+				makeFavorite()
 			else
-				modulebutton.Parent = children
-				modulechildren.Parent = children
+				removeFavorite()
 			end
-
-			local sorting = {}
-			for _, v in mainapi.Modules do
-				if v.Category == categorysettings.Name then
-					table.insert(sorting, v)
-				end
-			end
-
-			table.sort(sorting, function(a, b)
-				if a.Pinned ~= b.Pinned then
-					return a.Pinned
-				end
-				return a.Name < b.Name
-			end)
-
-			for i, v in sorting do
-				v.Index = i
-				v.Object.LayoutOrder = i
-				v.Children.LayoutOrder = i
-			end
+			sortFavorites()
 		end
 
 		pinbutton.MouseEnter:Connect(function()
@@ -5383,7 +5611,9 @@ function mainapi:CreateCategory(categorysettings)
 
 		for i, v in components do
 			moduleapi['Create'..i] = function(_, optionsettings)
-				return v(optionsettings, modulechildren, moduleapi)
+				local created = v(optionsettings, modulechildren, moduleapi)
+				table.insert(optionLog, {i, optionsettings, created})
+				return created
 			end
 		end
 
@@ -5410,9 +5640,7 @@ function mainapi:CreateCategory(categorysettings)
 				dots.ImageColor3 = color.Light(uipallet.Main, 0.37)
 			end
 		end)
-		dotsbutton.MouseButton1Click:Connect(function()
-			modulechildren.Visible = not modulechildren.Visible
-		end)
+		dotsbutton.MouseButton1Click:Connect(toggleHomeChildren)
 		dotsbutton.MouseButton2Click:Connect(function()
 			local existingReset = modulebutton:FindFirstChild('ResetCover')
 			if existingReset then
@@ -5484,9 +5712,7 @@ function mainapi:CreateCategory(categorysettings)
 				moduleapi:Toggle()
 			end
 		end)
-		modulebutton.MouseButton2Click:Connect(function()
-			modulechildren.Visible = not modulechildren.Visible
-		end)
+		modulebutton.MouseButton2Click:Connect(toggleHomeChildren)
 		windowlist:GetPropertyChangedSignal('AbsoluteContentSize'):Connect(function()
 			if mainapi.ThreadFix then
 				setthreadidentity(8)
@@ -7603,15 +7829,25 @@ local toolstroke = Instance.new('UIStroke')
 toolstroke.Color = color.Light(uipallet.Main, 0.02)
 toolstroke.Parent = toolstrokebkg
 addCorner(toolstrokebkg, UDim.new(0, 4))
+local function getAutoScale()
+	local size = gui.AbsoluteSize
+	if size.X <= 0 or size.Y <= 0 then return 1 end
+	local fit = math.min(size.X / 1920, size.Y / 1080)
+	if inputService.TouchEnabled and not inputService.KeyboardEnabled then
+		return math.clamp(fit * 1.25, 0.45, 1)
+	end
+	return math.clamp(math.min(size.X / 1920, size.Y / 1080 * 1.35), 0.6, 2)
+end
+
 scale = Instance.new('UIScale')
-scale.Scale = math.max(gui.AbsoluteSize.X / 1920, 0.6)
+scale.Scale = getAutoScale()
 scale.Parent = scaledgui
 mainapi.guiscale = scale
 scaledgui.Size = UDim2.fromScale(1 / scale.Scale, 1 / scale.Scale)
 
 mainapi:Clean(gui:GetPropertyChangedSignal('AbsoluteSize'):Connect(function()
 	if mainapi.Scale.Enabled then
-		scale.Scale = math.max(gui.AbsoluteSize.X / 1920, 0.6)
+		scale.Scale = getAutoScale()
 	end
 end))
 
@@ -8764,7 +9000,7 @@ mainapi.Scale = guipane:CreateToggle({
 	Function = function(callback)
 		scaleslider.Object.Visible = not callback
 		if callback then
-			scale.Scale = math.max(gui.AbsoluteSize.X / 1920, 0.6)
+			scale.Scale = getAutoScale()
 		else
 			scale.Scale = scaleslider.Value
 		end

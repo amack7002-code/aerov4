@@ -1,779 +1,501 @@
---!nocheck
+local Prediction = {}
 
-local module = {}
-local workspace = game:GetService('Workspace')
-local stats = game:GetService('Stats')
-local eps = 1e-9
-local RAY_LIMIT = 600
+local EPSILON = 1e-6
+local MAX_TIME = 4
+local STEP = 1 / 90
+local MAX_TARGET_SPEED = 120
+local LONG_VELOCITY_WINDOW = 0.18
+local SHORT_VELOCITY_WINDOW = 0.1
+local WALK_CAP = 45
+local KNOCK_DECAY = 0.12
+local VELOCITY_SMOOTH_TIME = 0.08
 
-local function isZero(d)
-	return d > -eps and d < eps
+local tracks = setmetatable({}, {__mode = 'k'})
+local floorParams = RaycastParams.new()
+floorParams.FilterType = Enum.RaycastFilterType.Include
+local floorMap = nil
+
+local function validNumber(value)
+	return type(value) == 'number' and value == value and math.abs(value) < math.huge
 end
 
-local function validNumber(v)
-	return type(v) == 'number' and v == v and v ~= math.huge and v ~= -math.huge
+local function validVector(value)
+	return typeof(value) == 'Vector3' and validNumber(value.X) and validNumber(value.Y) and validNumber(value.Z)
 end
 
-local function validVector(v)
-	if typeof(v) ~= 'Vector3' then return false end
-	return validNumber(v.X) and validNumber(v.Y) and validNumber(v.Z)
+local function flat(v)
+	return Vector3.new(v.X, 0, v.Z)
 end
 
-local function cuberoot(x)
-	return (x > 0) and math.pow(x, 1 / 3) or -math.pow(math.abs(x), 1 / 3)
-end
-
-local function solveQuadric(c0, c1, c2)
-	local p = c1 / (2 * c0)
-	local q = c2 / c0
-	local D = p * p - q
-
-	if isZero(D) then
-		return {-p}
-	elseif D < 0 then
-		return {}
-	end
-
-	local sqrtD = math.sqrt(D)
-	return {sqrtD - p, -sqrtD - p}
-end
-
-local function solveCubic(c0, c1, c2, c3)
-	local A = c1 / c0
-	local B = c2 / c0
-	local C = c3 / c0
-
-	local sqA = A * A
-	local p = (1 / 3) * (-(1 / 3) * sqA + B)
-	local q = 0.5 * ((2 / 27) * A * sqA - (1 / 3) * A * B + C)
-
-	local cbP = p * p * p
-	local D = q * q + cbP
-	local results
-
-	if isZero(D) then
-		if isZero(q) then
-			results = {0}
-		else
-			local u = cuberoot(-q)
-			results = {2 * u, -u}
-		end
-	elseif D < 0 then
-		local phi = (1 / 3) * math.acos(-q / math.sqrt(-cbP))
-		local t = 2 * math.sqrt(-p)
-		results = {
-			t * math.cos(phi),
-			-t * math.cos(phi + math.pi / 3),
-			-t * math.cos(phi - math.pi / 3)
-		}
-	else
-		local sqrtD = math.sqrt(D)
-		local u = cuberoot(sqrtD - q)
-		local v = -cuberoot(sqrtD + q)
-		results = {u + v}
-	end
-
-	local sub = (1 / 3) * A
-	for i = 1, #results do
-		results[i] = results[i] - sub
-	end
-	return results
-end
-
-function module.solveQuartic(c0, c1, c2, c3, c4)
-	if isZero(c0) then
-		return solveCubic(c1, c2, c3, c4)
-	end
-
-	local A = c1 / c0
-	local B = c2 / c0
-	local C = c3 / c0
-	local D = c4 / c0
-
-	local sqA = A * A
-	local p = -0.375 * sqA + B
-	local q = 0.125 * sqA * A - 0.5 * A * B + C
-	local r = -(3 / 256) * sqA * sqA + 0.0625 * sqA * B - 0.25 * A * C + D
-
-	local results
-
-	if isZero(r) then
-		results = solveCubic(1, 0, p, q)
-		table.insert(results, 0)
-	else
-		local cubic = solveCubic(1, -0.5 * p, -r, 0.5 * r * p - 0.125 * q * q)
-		local z = cubic[1]
-		if not z then return {} end
-
-		local u = z * z - r
-		local v = 2 * z - p
-
-		if isZero(u) then
-			u = 0
-		elseif u > 0 then
-			u = math.sqrt(u)
-		else
-			return {}
-		end
-
-		if isZero(v) then
-			v = 0
-		elseif v > 0 then
-			v = math.sqrt(v)
-		else
-			return {}
-		end
-
-		results = solveQuadric(1, q < 0 and -v or v, z - u)
-		local second = solveQuadric(1, q < 0 and v or -v, z + u)
-		for _, root in second do
-			table.insert(results, root)
-		end
-	end
-
-	local sub = 0.25 * A
-	for i = 1, #results do
-		results[i] = results[i] - sub
-	end
-	return results
-end
-
-local function interceptResidual(relativePosition, targetVelocity, halfRelativeAcceleration, projectileSpeed, t)
-	local offset = relativePosition + targetVelocity * t + halfRelativeAcceleration * (t * t)
-	return offset:Dot(offset) - projectileSpeed * projectileSpeed * t * t
-end
-
-function module.SolveIntercept(origin, projectileSpeed, projectileAcceleration, targetPosition, targetVelocity, targetAcceleration, minimumTime, maximumTime, preferHigh)
-	if not validVector(origin)
-		or not validVector(projectileAcceleration)
-		or not validVector(targetPosition)
-		or not validVector(targetVelocity)
-		or not validVector(targetAcceleration)
-		or not validNumber(projectileSpeed)
-		or projectileSpeed <= eps
-	then
-		return nil
-	end
-
-	local minT = math.max(tonumber(minimumTime) or 0, eps)
-	local maxT = tonumber(maximumTime) or 10
-	if not validNumber(maxT) or maxT < minT then return nil end
-
-	local wantHigh = preferHigh == true
-	local relativePosition = targetPosition - origin
-	local halfRelativeAcceleration = (targetAcceleration - projectileAcceleration) * 0.5
-	local bestTime
-
-	local function acceptRoot(root)
-		if not validNumber(root) or root < minT or root > maxT then return end
-		local residual = math.abs(interceptResidual(relativePosition, targetVelocity, halfRelativeAcceleration, projectileSpeed, root))
-		local scale = math.max(projectileSpeed * projectileSpeed * root * root, 1)
-		if residual <= math.max(0.05, scale * 0.001) then
-			if not bestTime then
-				bestTime = root
-			elseif wantHigh then
-				if root > bestTime then bestTime = root end
-			elseif root < bestTime then
-				bestTime = root
-			end
-		end
-	end
-
-	local c4 = halfRelativeAcceleration:Dot(halfRelativeAcceleration)
-	local c3 = 2 * targetVelocity:Dot(halfRelativeAcceleration)
-	local c2 = targetVelocity:Dot(targetVelocity) + 2 * relativePosition:Dot(halfRelativeAcceleration) - projectileSpeed * projectileSpeed
-	local c1 = 2 * relativePosition:Dot(targetVelocity)
-	local c0 = relativePosition:Dot(relativePosition)
-
-	if math.abs(c4) > eps then
-		local roots = module.solveQuartic(c4, c3, c2, c1, c0)
-		if roots then
-			for _, root in roots do
-				acceptRoot(root)
-			end
-		end
-	elseif math.abs(c2) > eps then
-		local discriminant = c1 * c1 - 4 * c2 * c0
-		if discriminant >= 0 then
-			local squareRoot = math.sqrt(discriminant)
-			acceptRoot((-c1 - squareRoot) / (2 * c2))
-			acceptRoot((-c1 + squareRoot) / (2 * c2))
-		end
-	elseif math.abs(c1) > eps then
-		acceptRoot(-c0 / c1)
-	end
-
-	if not bestTime then
-		local steps = 96
-		local previousTime = minT
-		local previousValue = interceptResidual(relativePosition, targetVelocity, halfRelativeAcceleration, projectileSpeed, previousTime)
-
-		for step = 1, steps do
-			local currentTime = minT + ((maxT - minT) * step / steps)
-			local currentValue = interceptResidual(relativePosition, targetVelocity, halfRelativeAcceleration, projectileSpeed, currentTime)
-
-			if validNumber(previousValue) and validNumber(currentValue) then
-				if previousValue == 0 then
-					bestTime = previousTime
-					break
-				end
-				if (previousValue < 0) ~= (currentValue < 0) then
-					local low, high = previousTime, currentTime
-					for _ = 1, 48 do
-						local mid = (low + high) * 0.5
-						local midValue = interceptResidual(relativePosition, targetVelocity, halfRelativeAcceleration, projectileSpeed, mid)
-						if not validNumber(midValue) then break end
-						if (previousValue < 0) == (midValue < 0) then
-							low = mid
-						else
-							high = mid
-						end
-					end
-					bestTime = (low + high) * 0.5
-					break
-				end
-			end
-
-			previousTime = currentTime
-			previousValue = currentValue
-		end
-	end
-
-	if not bestTime then return nil end
-
-	local displacement = relativePosition + targetVelocity * bestTime + halfRelativeAcceleration * (bestTime * bestTime)
-	if displacement.Magnitude <= eps then return nil end
-
-	local initialVelocity = displacement / bestTime
-	return {
-		FlightTime = bestTime,
-		InitialVelocity = initialVelocity,
-		ImpactPosition = targetPosition + targetVelocity * bestTime + targetAcceleration * (0.5 * bestTime * bestTime)
-	}
-end
-
-local function predictVertical(groundY, currentY, vy, jumpImpulse, holdingJump, gravity, t)
-	local g = gravity
-	if not validNumber(g) or g <= eps then return currentY + vy * t end
-
-	local j = math.max(jumpImpulse or 1, 1)
-	local apex = j * j / (2 * g)
-	local period = 2 * j / g
-	local rise = math.clamp(currentY - groundY, 0, apex)
-
-	if rise < 0.5 and math.abs(vy) < 5 then
-		return currentY
-	end
-
-	local sqrtTerm = math.sqrt(math.max(j * j - 2 * g * rise, 0))
-	local phase
-	if vy >= 0 then
-		phase = (j - sqrtTerm) / g
-	else
-		phase = (j + sqrtTerm) / g
-	end
-
-	local cycleT = phase + t
-
-	if holdingJump then
-		local tau = cycleT % period
-		return groundY + j * tau - 0.5 * g * tau * tau
-	end
-
-	if cycleT >= period then
-		return groundY
-	end
-
-	return groundY + j * cycleT - 0.5 * g * cycleT * cycleT
-end
-
-module.predictVertical = predictVertical
-
-local rawLatency = 0.1
-local latencyClock = 0
-
-function module.setLatency(value)
-	if validNumber(value) then
-		rawLatency = math.clamp(value, 0, 1)
-	end
-end
-
-function module.getRawLatency()
-	if tick() - latencyClock < 1 then return rawLatency end
-	latencyClock = tick()
-	local ok, value = pcall(function()
-		return stats.Network.ServerStatsItem['Data Ping']:GetValue() / 1000
-	end)
-	if ok and validNumber(value) then
-		rawLatency = math.clamp(value, 0.01, 1)
-	end
-	return rawLatency
-end
-
-local latencyBias = 0
-
-function module.getLatency()
-	return module.getRawLatency() + latencyBias
-end
-
-function module.getLatencyBias()
-	return latencyBias
-end
-
-local shotLog = {}
-local residualSpread = 0
-
-function module.trackShot(targetRoot)
-	if typeof(targetRoot) ~= 'Instance' then return end
-	shotLog[targetRoot] = {
-		time = workspace:GetServerTimeNow(),
-		position = targetRoot.Position
-	}
-end
-
-function module.reportHit(targetRoot)
-	local entry = shotLog[targetRoot]
-	if not entry then return end
-	shotLog[targetRoot] = nil
-	local drift = (targetRoot.Position - entry.position).Magnitude
-	residualSpread = residualSpread + (drift - residualSpread) * 0.25
-end
-
-function module.getResidualSpread()
-	return residualSpread
-end
-
-local knockbackLog = setmetatable({}, {__mode = 'k'})
-
-function module.markKnockback(target, multiplier, impulse)
-	if typeof(target) ~= 'Instance' then return end
-	knockbackLog[target] = {
-		time = workspace:GetServerTimeNow(),
-		multiplier = multiplier or 1,
-		impulse = impulse
-	}
-end
-
-function module.expectKnockback(target, arrival, impulse, multiplier)
-	module.markKnockback(target, multiplier, impulse)
-	return arrival
-end
-
-function module.Raycast(origin, direction, params)
-	if not validVector(origin) or not validVector(direction) then return nil end
+Prediction.Raycast = function(origin, direction, params)
 	return workspace:Raycast(origin, direction, params)
 end
 
-module.IsTrajectoryClear = function(origin, velocity, gravity, travelTime, params, target, ignored)
-	if not validVector(origin) or not validVector(velocity) then return true end
-	if not validNumber(travelTime) or travelTime <= 0 then return true end
-
-	local steps = math.clamp(math.ceil(travelTime / 0.06), 3, 24)
-	local previous = origin
-	local accel = Vector3.new(0, -(gravity or 0), 0)
-
-	for i = 1, steps do
-		local t = travelTime * (i / steps)
-		local point = origin + velocity * t + accel * (0.5 * t * t)
-		local segment = point - previous
-		if segment.Magnitude > eps then
-			for _, drop in {0, 0.3} do
-				local from = previous - Vector3.new(0, drop, 0)
-				local result = workspace:Raycast(from, segment, params)
-				if result then
-					local hit = result.Instance
-					if hit ~= ignored and (not target or not hit:IsDescendantOf(target)) then
-						return false, result
-					end
-				end
-			end
-		end
-		previous = point
-	end
-
-	return true
-end
-
-module.SpawnTracer = function(from, to, custom)
-	if not validVector(from) or not validVector(to) then return end
-	local part = Instance.new('Part')
-	part.Anchored = true
-	part.CanCollide = false
-	part.CanQuery = false
-	part.CanTouch = false
-	part.Material = Enum.Material.Neon
-	part.Color = (custom and custom.Color) or Color3.fromRGB(120, 220, 255)
-	part.Transparency = (custom and custom.Transparency) or 0.4
-	part.Size = Vector3.new(0.12, 0.12, (to - from).Magnitude)
-	part.CFrame = CFrame.lookAt((from + to) * 0.5, to)
-	part.Parent = workspace
-	game:GetService('Debris'):AddItem(part, (custom and custom.Life) or 0.4)
-	return part
-end
-
-module.SpawnArcTracer = function(origin, aimDirection, projectileSpeed, gravity, travelTime, steps, custom)
-	if not validVector(origin) or not validVector(aimDirection) then return end
-	steps = math.clamp(steps or 12, 2, 40)
-	local velocity = aimDirection.Unit * (projectileSpeed or 100)
-	local accel = Vector3.new(0, -(gravity or 0), 0)
-	local previous = origin
-	for i = 1, steps do
-		local t = (travelTime or 1) * (i / steps)
-		local point = origin + velocity * t + accel * (0.5 * t * t)
-		module.SpawnTracer(previous, point, custom)
-		previous = point
-	end
-end
-
-local runService = game:GetService('RunService')
-local playersService = game:GetService('Players')
-
-local tracked = setmetatable({}, {__mode = 'k'})
-local SAMPLE_WINDOW = 1.2
-local SHORT_WINDOW = 0.12
-local MID_WINDOW = 0.25
-local LONG_WINDOW = 1
-local MAX_HORIZONTAL_SPEED = 60
-local MAX_RISE_RATE = 20
-local GROUND_SLACK = 0.45
-local PILLAR_BIAS = 0.6
-
-local groundParams = RaycastParams.new()
-groundParams.FilterType = Enum.RaycastFilterType.Include
-local groundParamsClock = -1
-local groundMode = 'none'
-
-local function refreshGroundParams()
-	local now = os.clock()
-	if now - groundParamsClock < 2 then return groundMode ~= 'none' end
-	groundParamsClock = now
+local function getFloorParams(fallback)
 	local map = workspace:FindFirstChild('Map')
 	if map then
-		groundParams.FilterType = Enum.RaycastFilterType.Include
-		groundParams.FilterDescendantsInstances = {map}
-		groundMode = 'map'
-	else
-		local ignore = {}
-		for _, plr in playersService:GetPlayers() do
-			if plr.Character then
-				table.insert(ignore, plr.Character)
-			end
+		if map ~= floorMap then
+			floorMap = map
+			floorParams.FilterDescendantsInstances = {map}
 		end
-		if workspace.CurrentCamera then
-			table.insert(ignore, workspace.CurrentCamera)
-		end
-		groundParams.FilterType = Enum.RaycastFilterType.Exclude
-		groundParams.FilterDescendantsInstances = ignore
-		groundMode = 'exclude'
+		return floorParams
 	end
-	return true
+	return fallback
 end
 
-local function getStandHeight(root)
-	local char = root.Parent
-	local hum = char and char:FindFirstChildOfClass('Humanoid')
-	if hum and hum.RigType == Enum.HumanoidRigType.R15 then
-		return hum.HipHeight + root.Size.Y * 0.5
-	elseif hum then
-		return root.Size.Y * 0.5 + 2
-	end
-	return 3
+local function castDown(position, distance, params)
+	if not params then return nil end
+	return Prediction.Raycast(position + Vector3.new(0, 1, 0), Vector3.new(0, -(distance + 1), 0), params)
 end
 
-local function castFloor(position, depth)
-	if not refreshGroundParams() then return nil end
-	return workspace:Raycast(position, Vector3.new(0, -depth, 0), groundParams)
-end
-
-local function sampleRoot(root, data, now)
-	local pos = root.Position
-	local vel = root.AssemblyLinearVelocity
-	local samples = data.samples
-	table.insert(samples, {t = now, p = pos})
-	while #samples > 2 and now - samples[1].t > SAMPLE_WINDOW do
-		table.remove(samples, 1)
+Prediction.GetSpawnPosition = function(positionFrom, aimPoint, relX, relY, relZ)
+	if not validVector(positionFrom) or not validVector(aimPoint) then
+		return positionFrom
 	end
-
-	local stand = getStandHeight(root)
-	data.stand = stand
-	local hit = castFloor(pos, stand + 3)
-	local grounded = false
-	if hit then
-		local gap = pos.Y - hit.Position.Y
-		grounded = gap <= stand + GROUND_SLACK and vel.Y < 4
-		data.floorHitY = hit.Position.Y
+	if (aimPoint - positionFrom).Magnitude <= EPSILON then
+		return positionFrom
 	end
-
-	if grounded then
-		if not data.groundY or math.abs(pos.Y - data.groundY) > 0.05 then
-			table.insert(data.grounds, {t = now, y = pos.Y})
-		end
-		data.groundY = pos.Y
-		data.groundTime = now
-	end
-	while #data.grounds > 1 and now - data.grounds[1].t > SAMPLE_WINDOW do
-		table.remove(data.grounds, 1)
-	end
-	data.airborne = not grounded
-end
-
-runService.Heartbeat:Connect(function()
-	local now = os.clock()
-	for root, data in tracked do
-		if not root.Parent or now - data.lastUse > 5 then
-			tracked[root] = nil
-		else
-			sampleRoot(root, data, now)
-		end
-	end
-end)
-
-local function getTrack(root)
-	if typeof(root) ~= 'Instance' or not root:IsA('BasePart') then return nil end
-	local data = tracked[root]
-	local now = os.clock()
-	if not data then
-		data = {samples = {}, grounds = {}, lastUse = now}
-		tracked[root] = data
-		sampleRoot(root, data, now)
-	end
-	data.lastUse = now
-	return data
-end
-
-local function windowVelocity(samples, window)
-	local count = #samples
-	if count < 2 then return nil end
-	local last = samples[count]
-	local first
-	for i = count - 1, 1, -1 do
-		first = samples[i]
-		if last.t - first.t >= window then break end
-	end
-	local dt = last.t - first.t
-	if dt < math.min(window * 0.6, 0.07) then return nil end
-	local d = last.p - first.p
-	return Vector3.new(d.X, 0, d.Z) / dt
-end
-
-local function countReversals(samples)
-	local count = #samples
-	if count < 4 then return 0 end
-	local now = samples[count].t
-	local reversals = 0
-	local previous
-	local anchor = samples[count]
-	for i = count - 1, 1, -1 do
-		local s = samples[i]
-		if now - s.t > LONG_WINDOW then break end
-		if anchor.t - s.t >= 0.05 then
-			local d = anchor.p - s.p
-			local v = Vector3.new(d.X, 0, d.Z) / (anchor.t - s.t)
-			if v.Magnitude > 4 then
-				if previous and previous:Dot(v) < 0 then
-					reversals += 1
-				end
-				previous = v
-			end
-			anchor = s
-		end
-	end
-	return reversals
-end
-
-local function horizontalVelocity(data, root, fallback)
-	local raw = root and root.AssemblyLinearVelocity or fallback or Vector3.zero
-	raw = Vector3.new(raw.X, 0, raw.Z)
-	if not data then return raw end
-	local samples = data.samples
-	local mid = windowVelocity(samples, MID_WINDOW)
-	if not mid then return raw end
-	local short = windowVelocity(samples, SHORT_WINDOW) or mid
-	local base = mid
-	if short.Magnitude > 1 and mid.Magnitude > 1 and short.Unit:Dot(mid.Unit) < 0.7 then
-		base = short
-	end
-	local reversals = countReversals(samples)
-	if reversals >= 2 then
-		local long = windowVelocity(samples, LONG_WINDOW) or base
-		local w = math.clamp((reversals - 1) / 3, 0, 1)
-		base = base:Lerp(long, w)
-	end
-	return base
-end
-
-local function riseRate(data)
-	local grounds = data and data.grounds
-	if not grounds or #grounds < 2 then return 0 end
-	local first, last = grounds[1], grounds[#grounds]
-	local dt = last.t - first.t
-	if dt < 0.2 or os.clock() - last.t > 0.9 then return 0 end
-	local rate = (last.y - first.y) / dt
-	if rate < 1.5 then return 0 end
-	return math.min(rate, MAX_RISE_RATE)
-end
-
-module.LeadScale = 1
-module.MaxLead = 45
-module.MaxVerticalLead = 14
-
-function module.setLead(scale, maxLead, maxVertical)
-	if validNumber(scale) then module.LeadScale = math.clamp(scale, 0, 2) end
-	if validNumber(maxLead) then module.MaxLead = math.max(maxLead, 0) end
-	if validNumber(maxVertical) then module.MaxVerticalLead = math.max(maxVertical, 0) end
-end
-
-local function buildPredictor(targetPos, targetVelocity, root, targetAirborne, playerGravity)
-	local data = root and getTrack(root)
-	local rootPos = root and root.Position or targetPos
-	local partOffset = targetPos - rootPos
-
-	local hv
-	if root then
-		hv = horizontalVelocity(data, root, targetVelocity)
-	else
-		hv = Vector3.new(targetVelocity.X, 0, targetVelocity.Z)
-	end
-	if hv.Magnitude > MAX_HORIZONTAL_SPEED then
-		hv = hv.Unit * MAX_HORIZONTAL_SPEED
-	end
-	hv = hv * module.LeadScale
-
-	local vy = root and root.AssemblyLinearVelocity.Y or targetVelocity.Y
-	local airborne
-	if data then
-		airborne = data.airborne == true
-	elseif targetAirborne ~= nil then
-		airborne = targetAirborne == true
-	else
-		airborne = math.abs(vy) > 3
-	end
-
-	local g = validNumber(playerGravity) and playerGravity > 0 and playerGravity or workspace.Gravity
-	local stand = data and data.stand or 3
-	local rise = riseRate(data)
-	local pillaring = rise > 0
-	local bias = pillaring and PILLAR_BIAS or 0
-
-	return function(t)
-		local flat = hv * t
-		if flat.Magnitude > module.MaxLead then
-			flat = flat.Unit * module.MaxLead
-		end
-
-		local y = rootPos.Y
-		if airborne then
-			y = rootPos.Y + vy * t - 0.5 * g * t * t
-			if root then
-				local probe = Vector3.new(rootPos.X + flat.X, math.max(rootPos.Y, y) + 1, rootPos.Z + flat.Z)
-				local hit = castFloor(probe, (probe.Y - y) + stand + 60)
-				if hit then
-					local floorRoot = hit.Position.Y + stand
-					if y < floorRoot then
-						y = floorRoot
-					end
-				end
-			end
-		end
-
-		if pillaring then
-			local groundY = data.groundY or rootPos.Y
-			y = math.max(y, rootPos.Y, groundY + rise * t)
-		end
-
-		local dy = math.clamp(y - rootPos.Y, -module.MaxVerticalLead, module.MaxVerticalLead)
-		return rootPos + partOffset + flat + Vector3.new(0, dy + bias, 0)
-	end
-end
-
-module.PredictPosition = function(targetPos, targetVelocity, time, targetRoot, targetAirborne, playerGravity)
-	if not validVector(targetPos) or not validNumber(time) then return targetPos end
-	local root = typeof(targetRoot) == 'Instance' and targetRoot or nil
-	return buildPredictor(targetPos, validVector(targetVelocity) and targetVelocity or Vector3.zero, root, targetAirborne, playerGravity)(time)
-end
-
-function module.GetSpawnPosition(positionFrom, aimPoint, relX, relY, relZ)
-	if not validVector(positionFrom) or not validVector(aimPoint) then return positionFrom end
-	if (aimPoint - positionFrom).Magnitude <= eps then return positionFrom end
 	return (CFrame.new(positionFrom, aimPoint) * CFrame.new(relX or 0.8, relY or -0.6, relZ or 0)).Position
 end
 
-local function solveStatic(origin, projectileSpeed, projectileAccel, point, minimumTime, maxTime)
-	return module.SolveIntercept(origin, projectileSpeed, projectileAccel, point, Vector3.zero, Vector3.zero, minimumTime, maxTime, false)
+Prediction.ProjectilePosition = function(origin, velocity, gravity, t)
+	return origin + velocity * t + Vector3.new(0, -0.5 * gravity * t * t, 0)
 end
 
-module.SolveTrajectory = function(origin, projectileSpeed, gravity, targetPos, targetVelocity, playerGravity, playerHeight, playerJump, params, targetAirborne, targetRootPosition, targetRoot, minimumTime, strict)
-	targetVelocity = targetVelocity or Vector3.zero
+local function solve3(m, r)
+	local a, b, c = m[1], m[2], m[3]
+	local det = a[1] * (b[2] * c[3] - b[3] * c[2]) - a[2] * (b[1] * c[3] - b[3] * c[1]) + a[3] * (b[1] * c[2] - b[2] * c[1])
+	if math.abs(det) < 1e-12 then return nil end
+	local function col(i)
+		local mm = {{a[1], a[2], a[3]}, {b[1], b[2], b[3]}, {c[1], c[2], c[3]}}
+		mm[1][i], mm[2][i], mm[3][i] = r[1], r[2], r[3]
+		local x, y, z = mm[1], mm[2], mm[3]
+		return (x[1] * (y[2] * z[3] - y[3] * z[2]) - x[2] * (y[1] * z[3] - y[3] * z[1]) + x[3] * (y[1] * z[2] - y[2] * z[1])) / det
+	end
+	return col(1), col(2), col(3)
+end
+
+local function fitLine(samples, now, window, axis)
+	local n, st, sv, stt, stv = 0, 0, 0, 0, 0
+	local first, last
+	for i = #samples, 1, -1 do
+		local s = samples[i]
+		local dt = s.t - now
+		if dt < -window then break end
+		local v = s.p[axis]
+		n += 1
+		st += dt
+		sv += v
+		stt += dt * dt
+		stv += dt * v
+		first = first or s.t
+		last = s.t
+	end
+	if n < 3 or (first - last) < window * 0.4 then return nil end
+	local denom = n * stt - st * st
+	if math.abs(denom) < 1e-9 then return nil end
+	return (n * stv - st * sv) / denom
+end
+
+local function fitArc(samples, now, window, since)
+	local s00, s01, s02, s03, s04 = 0, 0, 0, 0, 0
+	local r0, r1, r2 = 0, 0, 0
+	local n, first, last = 0, nil, nil
+	for i = #samples, 1, -1 do
+		local s = samples[i]
+		local dt = s.t - now
+		if dt < -window or (since and s.t <= since) then break end
+		local y = s.p.Y
+		local d2 = dt * dt
+		n += 1
+		s00 += 1
+		s01 += dt
+		s02 += d2
+		s03 += d2 * dt
+		s04 += d2 * d2
+		r0 += y
+		r1 += y * dt
+		r2 += y * d2
+		first = first or s.t
+		last = s.t
+	end
+	if n < 10 or (first - last) < 0.2 then return nil end
+	local _, b, c = solve3({{s00, s01, s02}, {s01, s02, s03}, {s02, s03, s04}}, {r0, r1, r2})
+	if not b then return nil end
+	return b, -2 * c
+end
+
+local function fitKnown(samples, now, window, since, g0)
+	local n, st, sz, stt, stz = 0, 0, 0, 0, 0
+	local first, last
+	for i = #samples, 1, -1 do
+		local s = samples[i]
+		local dt = s.t - now
+		if dt < -window or (since and s.t <= since) then break end
+		local z = s.p.Y + 0.5 * g0 * dt * dt
+		n += 1
+		st += dt
+		sz += z
+		stt += dt * dt
+		stz += dt * z
+		first = first or s.t
+		last = s.t
+	end
+	if n < 3 or (first - last) < 0.04 then return nil end
+	local denom = n * stt - st * st
+	if math.abs(denom) < 1e-9 then return nil end
+	return (n * stz - st * sz) / denom
+end
+
+Prediction.Observe = function(root, position)
+	if typeof(root) ~= 'Instance' or not validVector(position) then return end
+	local now = os.clock()
+	local track = tracks[root]
+	if not track then
+		track = {samples = {}, history = {}}
+		tracks[root] = track
+	end
+	local samples = track.samples
+	local last = samples[#samples]
+	if last and now - last.t < 1 / 120 then return end
+	if last and (position - last.p).Magnitude < 1e-4 and now - last.t < 0.15 then return end
+	if last and (position - last.p).Magnitude > 60 then
+		table.clear(samples)
+		table.clear(track.history)
+	end
+	table.insert(samples, {t = now, p = position})
+	while #samples > 60 or (samples[1] and now - samples[1].t > 1) do
+		table.remove(samples, 1)
+	end
+
+	local vx = fitLine(samples, now, LONG_VELOCITY_WINDOW, 'X')
+	local vz = fitLine(samples, now, LONG_VELOCITY_WINDOW, 'Z')
+	local shortX = fitLine(samples, now, SHORT_VELOCITY_WINDOW, 'X')
+	local shortZ = fitLine(samples, now, SHORT_VELOCITY_WINDOW, 'Z')
+	local g0 = workspace.Gravity
+	local onGround = track.groundT and now - track.groundT < 0.05
+
+	if vx and vz then
+		local horizontal = Vector3.new(vx, 0, vz)
+
+		if shortX and shortZ then
+			local recent = Vector3.new(shortX, 0, shortZ)
+
+			if horizontal.Magnitude > 2 and recent.Magnitude > 2 then
+				local directionDot = horizontal.Unit:Dot(recent.Unit)
+				local speedChange = math.abs(recent.Magnitude - horizontal.Magnitude)
+
+				if directionDot < 0.7 or speedChange > 8 then
+					horizontal = recent
+				else
+					horizontal = horizontal:Lerp(recent, 0.35)
+				end
+			else
+				horizontal = recent
+			end
+		end
+
+		local vy = fitLine(samples, now, 0.1, 'Y') or 0
+		local grav = nil
+
+		if not onGround then
+			local vyKnown = fitKnown(samples, now, 0.15, track.groundT, g0)
+			if vyKnown then
+				vy = vyKnown
+			end
+
+			local vyArc, g = fitArc(samples, now, 0.35, track.groundT)
+			if vyArc and g and g > g0 * 0.4 and g < g0 * 1.6 then
+				grav = g
+			end
+		end
+
+		local measuredVelocity = Vector3.new(horizontal.X, vy, horizontal.Z)
+		if track.vel and track.velT then
+			local dt = math.clamp(now - track.velT, 0, 0.1)
+			local alpha = 1 - math.exp(-dt / VELOCITY_SMOOTH_TIME)
+			local oldHorizontal = flat(track.vel)
+			local newHorizontal = flat(measuredVelocity)
+			local smoothedHorizontal = oldHorizontal:Lerp(newHorizontal, alpha)
+			track.vel = Vector3.new(smoothedHorizontal.X, measuredVelocity.Y, smoothedHorizontal.Z)
+		else
+			track.vel = measuredVelocity
+		end
+		track.gravity = grav
+		track.velT = now
+
+		table.insert(track.history, {
+			t = now,
+			v = horizontal
+		})
+
+		while track.history[1] and now - track.history[1].t > 1 do
+			table.remove(track.history, 1)
+		end
+	end
+
+	local minY = math.huge
+	for i = #samples, 1, -1 do
+		if now - samples[i].t > 1.2 then break end
+		minY = math.min(minY, samples[i].p.Y)
+	end
+	track.minY = minY
+	local prev = samples[#samples - 1]
+	if prev then
+		local lift = minY + 0.5
+		if prev.p.Y <= lift and position.Y > lift then
+			track.jumps = track.jumps or {}
+			table.insert(track.jumps, now)
+			while track.jumps[1] and now - track.jumps[1] > 2 do
+				table.remove(track.jumps, 1)
+			end
+			track.peak = position.Y
+		elseif track.peak and position.Y > track.peak then
+			track.peak = position.Y
+		end
+		if track.peak and prev.p.Y > lift and position.Y <= lift then
+			track.jumpH = track.peak - minY
+			track.peak = nil
+		end
+	end
+
+	local count = #samples
+	if count >= 4 then
+		local low, high = math.huge, -math.huge
+		local oldest = nil
+		for i = count, 1, -1 do
+			local s = samples[i]
+			if now - s.t > 0.15 then break end
+			low = math.min(low, s.p.Y)
+			high = math.max(high, s.p.Y)
+			oldest = s
+		end
+		if oldest and now - oldest.t >= 0.12 and high - low < 0.15 then
+			track.groundY = position.Y
+			track.groundT = now
+		end
+	end
+end
+
+local function isStrafing(track, horizontal)
+	if not track or horizontal.Magnitude < 4 then return false end
+	local now = os.clock()
+	for i = #track.history, 1, -1 do
+		local h = track.history[i]
+		local age = now - h.t
+		if age > 0.7 then break end
+		if age > 0.2 and h.v.Magnitude > 4 and h.v.Unit:Dot(horizontal.Unit) < -0.3 then
+			return true
+		end
+	end
+	return false
+end
+
+Prediction.SolveTrajectory = function(origin, projectileSpeed, gravity, targetPos, targetVelocity, playerGravity, playerHeight, playerJump, params, targetAirborne, targetRootPosition, targetRoot, minimumTime, strict, motionScale)
 	projectileSpeed = tonumber(projectileSpeed) or 0
 	gravity = tonumber(gravity) or 0
+	playerGravity = tonumber(playerGravity) or workspace.Gravity
+	playerHeight = tonumber(playerHeight) or 2
+	targetVelocity = validVector(targetVelocity) and targetVelocity or Vector3.zero
+	motionScale = math.clamp(tonumber(motionScale) or 1, 0, 1)
 
-	if not validVector(origin)
-		or not validVector(targetPos)
-		or not validVector(targetVelocity)
-		or not validNumber(projectileSpeed)
-		or projectileSpeed <= eps
-		or not validNumber(gravity)
-	then
+	if typeof(targetRootPosition) == 'Instance' and targetRootPosition:IsA('BasePart') then
+		targetRoot = targetRootPosition
+		targetRootPosition = targetRoot.Position
+	end
+
+	if not validVector(origin) or not validVector(targetPos) or not validNumber(projectileSpeed) or projectileSpeed <= EPSILON or not validNumber(gravity) then
 		if strict then return nil end
-		return targetPos, targetPos, 0
+		return targetPos, targetPos
 	end
 
-	local projectileAccel = Vector3.new(0, -gravity, 0)
-	local maxTime = 10
-	if validNumber(minimumTime) then
-		maxTime = math.max(maxTime, minimumTime + 1)
+	if not validVector(targetRootPosition) then
+		targetRootPosition = targetPos
+	end
+	local partOffset = targetPos - targetRootPosition
+
+	local rootHalf = 1
+	if typeof(targetRoot) == 'Instance' and targetRoot:IsA('BasePart') then
+		rootHalf = targetRoot.Size.Y / 2
+	else
+		targetRoot = nil
+	end
+	local standOffset = playerHeight + rootHalf
+
+	local track = targetRoot and tracks[targetRoot]
+	local fresh = track and track.vel and os.clock() - track.velT < 0.25
+	local horizontal = flat(targetVelocity)
+	local vy = targetVelocity.Y
+
+	if fresh and targetVelocity.Magnitude > EPSILON then
+		horizontal = flat(track.vel)
+		vy = track.vel.Y
+
+		if track.gravity then
+			playerGravity = track.gravity
+		end
 	end
 
-	local root = typeof(targetRoot) == 'Instance' and targetRoot or (typeof(targetRootPosition) == 'Instance' and targetRootPosition) or nil
-	local predict = buildPredictor(targetPos, targetVelocity, root, targetAirborne, playerGravity)
-	local latency = module.getRawLatency() * 0.5
-
-	local solution = solveStatic(origin, projectileSpeed, projectileAccel, targetPos, minimumTime, maxTime)
-	if not solution then
-		if strict then return nil end
-		return targetPos, targetPos, 0
+	if horizontal.Magnitude > MAX_TARGET_SPEED then
+		horizontal = horizontal.Unit * MAX_TARGET_SPEED
 	end
 
-	local aimPoint = targetPos
-	for _ = 1, 8 do
-		local nextAim = predict(solution.FlightTime + latency)
-		local nextSolution = solveStatic(origin, projectileSpeed, projectileAccel, nextAim, minimumTime, maxTime)
-		if not nextSolution then break end
-		local settled = math.abs(nextSolution.FlightTime - solution.FlightTime) < 0.001
-		solution = nextSolution
-		aimPoint = nextAim
-		if settled then break end
+	local bhop = nil
+	if track and track.jumps and #track.jumps >= 2 and track.jumpH and track.jumpH > 1 and track.minY and playerGravity > EPSILON then
+		local last = track.jumps[#track.jumps]
+		local period = last - track.jumps[#track.jumps - 1]
+		if period > 0.25 and period < 1.2 and os.clock() - last < period * 1.5 then
+			local jv = math.sqrt(2 * playerGravity * track.jumpH)
+			bhop = {
+				last = last,
+				period = period,
+				jv = jv,
+				air = 2 * jv / playerGravity,
+				ground = track.minY
+			}
+		end
 	end
 
-	local launchVelocity = solution.InitialVelocity
-	if not validVector(launchVelocity) or launchVelocity.Magnitude <= eps then
-		if strict then return nil end
-		return targetPos, targetPos, 0
+	local floorCheck = getFloorParams(params)
+	local steady = track and track.groundT and os.clock() - track.groundT < 0.2
+	local airborne = true
+	local below = floorCheck and castDown(targetRootPosition, standOffset + 1.2, floorCheck)
+	if below and math.abs(vy) < 6 then
+		airborne = false
+	elseif math.abs(vy) < 1 and (steady or targetAirborne == false) then
+		airborne = false
 	end
-
-	if params and solution.FlightTime then
-		local clear = module.IsTrajectoryClear(origin, launchVelocity, gravity, solution.FlightTime * 0.97, params, nil, nil)
-		if clear == false and root then
-			for _, raise in {0.6, 1.2, 1.8} do
-				local raised = aimPoint + Vector3.new(0, raise, 0)
-				local raisedSolution = solveStatic(origin, projectileSpeed, projectileAccel, raised, minimumTime, maxTime)
-				if raisedSolution and validVector(raisedSolution.InitialVelocity) then
-					if module.IsTrajectoryClear(origin, raisedSolution.InitialVelocity, gravity, raisedSolution.FlightTime * 0.97, params, nil, nil) ~= false then
-						solution = raisedSolution
-						launchVelocity = raisedSolution.InitialVelocity
-						aimPoint = raised
-						clear = true
-						break
-					end
+	if not airborne then
+		vy = 0
+	end
+    
+	local floorY = nil
+	if airborne and playerGravity > EPSILON then
+		local apexY = targetRootPosition.Y + (vy > 0 and (vy * vy) / (2 * playerGravity) or 0)
+		local guessT = math.min((targetPos - origin).Magnitude / projectileSpeed, MAX_TIME)
+		local candidates = {
+			castDown(targetRootPosition + horizontal * guessT, 300, floorCheck),
+			castDown(targetRootPosition, 300, floorCheck)
+		}
+		for _, hit in candidates do
+			if hit then
+				local y = hit.Position.Y + standOffset
+				if y <= apexY + 0.5 then
+					floorY = y
+					break
 				end
 			end
 		end
-		if clear == false and strict then
-			return nil
+		if not floorY and track then
+			if track.groundY and os.clock() - track.groundT < 1.5 and vy > -40 and track.groundY <= apexY + 0.5 then
+				floorY = track.groundY
+			end
 		end
 	end
 
-	return origin + launchVelocity, aimPoint, solution.FlightTime
+	local function leadAt(t)
+		local speed = horizontal.Magnitude
+		if speed <= EPSILON then return Vector3.zero end
+		local walk = math.min(speed, WALK_CAP)
+		local dist = walk * t
+		if speed > walk then
+			dist += (speed - walk) * KNOCK_DECAY * (1 - math.exp(-t / KNOCK_DECAY))
+		end
+		return horizontal.Unit * dist
+	end
+
+	local function rootAt(t)
+		local pos = targetRootPosition + leadAt(t)
+		if bhop then
+			local tj = (os.clock() - bhop.last + t) % bhop.period
+			local y = bhop.ground
+			if tj < bhop.air then
+				y = bhop.ground + bhop.jv * tj - 0.5 * playerGravity * tj * tj
+			end
+			pos = Vector3.new(pos.X, y, pos.Z)
+		elseif airborne then
+			local y = targetRootPosition.Y + vy * t - 0.5 * playerGravity * t * t
+			if floorY and y < floorY and vy - playerGravity * t < 0 then
+				y = floorY
+			end
+			pos = Vector3.new(pos.X, y, pos.Z)
+		end
+		return targetRootPosition:Lerp(pos, motionScale)
+	end
+
+	local half = Vector3.new(0, 0.5 * gravity, 0)
+	local function miss(t)
+		local need = rootAt(t) + partOffset - origin + half * t * t
+		return need.Magnitude - projectileSpeed * t
+	end
+
+	local t = nil
+	local lastT = 0
+	local current = STEP
+	while current <= MAX_TIME do
+		if miss(current) <= 0 then
+			local low, high = lastT, current
+			for _ = 1, 30 do
+				local mid = (low + high) / 2
+				if miss(mid) > 0 then
+					low = mid
+				else
+					high = mid
+				end
+			end
+			t = high
+			break
+		end
+		lastT = current
+		current += current < 0.5 and STEP or STEP * 2
+	end
+
+	if not t then
+		if strict then return nil end
+		return targetPos, targetPos
+	end
+
+	if minimumTime and t < minimumTime then
+		t = minimumTime
+	end
+
+	local impact = rootAt(t) + partOffset
+	if t <= EPSILON then
+		return impact, impact, 0
+	end
+
+	local velocity = (impact - origin + half * t * t) / t
+	if not validVector(velocity) or velocity.Magnitude <= EPSILON then
+		if strict then return nil end
+		return targetPos, targetPos
+	end
+	velocity = velocity.Unit * projectileSpeed
+
+	return origin + velocity, impact, t
 end
 
-return module
+Prediction.IsTrajectoryClear = function(origin, velocity, gravity, travelTime, params)
+	if not validVector(origin) or not validVector(velocity) or not validNumber(travelTime) then
+		return false
+	end
+	local steps = math.clamp(math.ceil(travelTime / 0.05), 1, 40)
+	local last = origin
+	for i = 1, steps do
+		local point = Prediction.ProjectilePosition(origin, velocity, gravity, travelTime * (i / steps))
+		local hit = Prediction.Raycast(last, point - last, params)
+		if hit then
+			return false, hit
+		end
+		last = point
+	end
+	return true
+end
+
+Prediction.markKnockback = function() end
+Prediction.expectKnockback = function() end
+Prediction.trackShot = function() end
+Prediction.reportHit = function() end
+Prediction.setLatency = function() end
+Prediction.getLatency = function() return 0 end
+
+return Prediction

@@ -1,5 +1,4 @@
 local Prediction = {}
-
 local EPSILON = 1e-6
 local MAX_TIME = 4
 local STEP = 1 / 90
@@ -9,7 +8,6 @@ local SHORT_VELOCITY_WINDOW = 0.1
 local WALK_CAP = 45
 local KNOCK_DECAY = 0.12
 local VELOCITY_SMOOTH_TIME = 0.08
-
 local tracks = setmetatable({}, {__mode = 'k'})
 local floorParams = RaycastParams.new()
 floorParams.FilterType = Enum.RaycastFilterType.Include
@@ -327,9 +325,13 @@ Prediction.SolveTrajectory = function(origin, projectileSpeed, gravity, targetPo
 	local horizontal = flat(targetVelocity)
 	local vy = targetVelocity.Y
 
-	if fresh and targetVelocity.Magnitude > EPSILON then
-		horizontal = flat(track.vel)
-		vy = track.vel.Y
+	if fresh then
+		if horizontal.Magnitude < 0.5 then
+			horizontal = flat(track.vel)
+		end
+		if targetVelocity.Magnitude <= EPSILON then
+			vy = track.vel.Y
+		end
 
 		if track.gravity then
 			playerGravity = track.gravity
@@ -341,21 +343,6 @@ Prediction.SolveTrajectory = function(origin, projectileSpeed, gravity, targetPo
 	end
 
 	local bhop = nil
-	if track and track.jumps and #track.jumps >= 2 and track.jumpH and track.jumpH > 1 and track.minY and playerGravity > EPSILON then
-		local last = track.jumps[#track.jumps]
-		local period = last - track.jumps[#track.jumps - 1]
-		if period > 0.25 and period < 1.2 and os.clock() - last < period * 1.5 then
-			local jv = math.sqrt(2 * playerGravity * track.jumpH)
-			bhop = {
-				last = last,
-				period = period,
-				jv = jv,
-				air = 2 * jv / playerGravity,
-				ground = track.minY
-			}
-		end
-	end
-
 	local floorCheck = getFloorParams(params)
 	local steady = track and track.groundT and os.clock() - track.groundT < 0.2
 	local airborne = true
@@ -404,8 +391,26 @@ Prediction.SolveTrajectory = function(origin, projectileSpeed, gravity, targetPo
 		return horizontal.Unit * dist
 	end
 
+	local edgeT, edgeFloor = nil, nil
+	if not airborne and floorCheck and horizontal.Magnitude > 4 then
+		for i = 1, 8 do
+			local tt = i * 0.075
+			local ahead = targetRootPosition + flat(horizontal) * tt
+			if not castDown(ahead, standOffset + 1.5, floorCheck) then
+				local deep = castDown(ahead, 300, floorCheck)
+				edgeT = tt - 0.0375
+				edgeFloor = deep and (deep.Position.Y + standOffset) or (targetRootPosition.Y - 300)
+				break
+			end
+		end
+	end
+
 	local function rootAt(t)
 		local pos = targetRootPosition + leadAt(t)
+		if edgeT and t > edgeT then
+			local ft = t - edgeT
+			pos = Vector3.new(pos.X, math.max(targetRootPosition.Y - 0.5 * playerGravity * ft * ft, edgeFloor), pos.Z)
+		end
 		if bhop then
 			local tj = (os.clock() - bhop.last + t) % bhop.period
 			local y = bhop.ground

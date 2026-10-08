@@ -1,4 +1,5 @@
 --This watermark is used to delete the file if its cached, remove it to make the file persist after vape updates.
+--This watermark is used to delete the file if its cached, remove it to make the file persist after vape updates.
 local mainapi = {
 	Categories = {},
 	GUIColor = {
@@ -4103,10 +4104,12 @@ function mainapi:CreateGUI()
 		button.MouseEnter:Connect(function()
 			btnHovered = true
 			if not optionapi.Enabled then
-				button.TextColor3 = uipallet.Text
-				if icon then icon.ImageColor3 = uipallet.Text end
+				local guiColor = Color3.fromHSV(mainapi.GUIColor.Hue, mainapi.GUIColor.Sat, mainapi.GUIColor.Value)
+				button.TextColor3 = guiColor:Lerp(uipallet.Text, 0.35)
+				if icon then icon.ImageColor3 = button.TextColor3 end
 				button.BackgroundColor3 = color.Light(uipallet.Main, 0.02)
 				if accent then
+					accent.BackgroundColor3 = guiColor
 					tween:Tween(accent, uipallet.Tween, {Size = UDim2.fromOffset(4, 10)})
 				end
 			end
@@ -7453,6 +7456,19 @@ function mainapi:Load(skipgui, profile)
 		end
 	end
 
+	local placed = {}
+	local function applyPositions()
+		for i, v in guidata.Positions or {} do
+			local object = self.Categories[i]
+			if object and object.Object and not placed[i] and type(v) == 'table' and v.X then
+				placed[i] = true
+				object.Object.Position = UDim2.fromOffset(v.X, v.Y)
+			end
+		end
+	end
+	applyPositions()
+	task.delay(3, applyPositions)
+
 	for i, v in savedata.Modules or {} do
 		local object = self.Modules[i]
 		if not object then continue end
@@ -7654,6 +7670,24 @@ function mainapi:Save(newprofile)
 			List = v.List,
 			ListEnabled = v.ListEnabled
 		}
+	end
+
+	guidata.Positions = {}
+	local oldgui = isfile('aerov4/profiles/'..game.GameId..'.gui.txt') and loadJson('aerov4/profiles/'..game.GameId..'.gui.txt')
+	if type(oldgui) == 'table' then
+		for i, v in oldgui.Categories or {} do
+			if not self.Categories[i] then
+				guidata.Categories[i] = v
+			end
+		end
+		for i, v in oldgui.Positions or {} do
+			guidata.Positions[i] = v
+		end
+	end
+	for i, v in self.Categories do
+		if v.Object then
+			guidata.Positions[i] = {X = v.Object.Position.X.Offset, Y = v.Object.Position.Y.Offset}
+		end
 	end
 
 	for i, v in self.Modules do

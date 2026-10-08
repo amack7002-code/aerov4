@@ -3634,6 +3634,101 @@ run(function()
 	local DistanceLimit
 	local Reference = {}
 	local methodused
+	local Draw = {}
+	do
+		local layer
+		local function getLayer()
+			if layer and layer.Parent then return layer end
+			layer = Instance.new('ScreenGui')
+			layer.Name = 'ESPLayer'
+			layer.IgnoreGuiInset = true
+			layer.ResetOnSpawn = false
+			layer.ZIndexBehavior = Enum.ZIndexBehavior.Global
+			layer.Parent = vape.gui and vape.gui.Parent or game:GetService('CoreGui')
+			return layer
+		end
+		local function apply(self)
+			local p, inst = self.props, self.inst
+			if not inst then return end
+			inst.Visible = p.Visible
+			inst.ZIndex = math.max(p.ZIndex, 0) + 1
+			if self.kind == 'Square' then
+				inst.Position = UDim2.fromOffset(p.Position.X, p.Position.Y)
+				inst.Size = UDim2.fromOffset(p.Size.X, p.Size.Y)
+				if p.Filled then
+					inst.BackgroundColor3 = p.Color
+					inst.BackgroundTransparency = 1 - p.Transparency
+					self.stroke.Enabled = false
+				else
+					inst.BackgroundTransparency = 1
+					self.stroke.Enabled = true
+					self.stroke.Color = p.Color
+					self.stroke.Thickness = p.Thickness
+					self.stroke.Transparency = 1 - p.Transparency
+				end
+			elseif self.kind == 'Line' then
+				local delta = p.To - p.From
+				local mid = (p.From + p.To) / 2
+				inst.Position = UDim2.fromOffset(mid.X, mid.Y)
+				inst.Size = UDim2.fromOffset(delta.Magnitude, p.Thickness)
+				inst.Rotation = math.deg(math.atan2(delta.Y, delta.X))
+				inst.BackgroundColor3 = p.Color
+				inst.BackgroundTransparency = 1 - p.Transparency
+			else
+				inst.Text = p.Text
+				inst.TextSize = p.Size
+				inst.TextColor3 = p.Color
+				inst.TextTransparency = 1 - p.Transparency
+				inst.AnchorPoint = Vector2.new(p.Center and 0.5 or 0, 0)
+				inst.Position = UDim2.fromOffset(p.Position.X, p.Position.Y)
+			end
+		end
+		local mt = {}
+		mt.__index = function(self, key)
+			if key == 'Remove' or key == 'Destroy' then
+				return function(obj)
+					if obj.inst then
+						obj.inst:Destroy()
+						obj.inst = nil
+					end
+				end
+			elseif key == 'TextBounds' then
+				return self.inst and self.inst.TextBounds or Vector2.zero
+			end
+			return self.props[key]
+		end
+		mt.__newindex = function(self, key, value)
+			self.props[key] = value
+			apply(self)
+		end
+		function Draw.new(kind)
+			local obj = {kind = kind, props = {Visible = false, Transparency = 1, Color = Color3.new(1, 1, 1), Thickness = 1, ZIndex = 1, Filled = false, Position = Vector2.zero, Size = kind == 'Text' and 13 or Vector2.zero, From = Vector2.zero, To = Vector2.zero, Text = '', Center = false}}
+			if kind == 'Text' then
+				local label = Instance.new('TextLabel')
+				label.BackgroundTransparency = 1
+				label.Font = Enum.Font.GothamMedium
+				label.AutomaticSize = Enum.AutomaticSize.XY
+				label.Size = UDim2.fromOffset(0, 0)
+				label.Parent = getLayer()
+				obj.inst = label
+			else
+				local frame = Instance.new('Frame')
+				frame.BorderSizePixel = 0
+				frame.AnchorPoint = kind == 'Line' and Vector2.new(0.5, 0.5) or Vector2.zero
+				frame.Parent = getLayer()
+				obj.inst = frame
+				if kind == 'Square' then
+					local stroke = Instance.new('UIStroke')
+					stroke.ApplyStrokeMode = Enum.ApplyStrokeMode.Border
+					stroke.Parent = frame
+					obj.stroke = stroke
+				end
+			end
+			setmetatable(obj, mt)
+			apply(obj)
+			return obj
+		end
+	end
 	
 	local function ESPWorldToViewport(pos)
 		local newpos = gameCamera:WorldToViewportPoint(gameCamera.CFrame:pointToWorldSpace(gameCamera.CFrame:PointToObjectSpace(pos)))
@@ -3649,7 +3744,7 @@ run(function()
 				setthreadidentity(8)
 			end
 			local EntityESP = {}
-			EntityESP.Main = Drawing.new('Square')
+			EntityESP.Main = Draw.new('Square')
 			EntityESP.Main.Transparency = BoundingBox.Enabled and 1 or 0
 			EntityESP.Main.ZIndex = 2
 			EntityESP.Main.Filled = false
@@ -3657,13 +3752,13 @@ run(function()
 			EntityESP.Main.Color = entitylib.getEntityColor(ent) or Color3.fromHSV(Color.Hue, Color.Sat, Color.Value)
 	
 			if BoundingBox.Enabled then
-				EntityESP.Border = Drawing.new('Square')
+				EntityESP.Border = Draw.new('Square')
 				EntityESP.Border.Transparency = 0.35
 				EntityESP.Border.ZIndex = 1
 				EntityESP.Border.Thickness = 1
 				EntityESP.Border.Filled = false
 				EntityESP.Border.Color = Color3.new()
-				EntityESP.Border2 = Drawing.new('Square')
+				EntityESP.Border2 = Draw.new('Square')
 				EntityESP.Border2.Transparency = 0.35
 				EntityESP.Border2.ZIndex = 1
 				EntityESP.Border2.Thickness = 1
@@ -3672,11 +3767,11 @@ run(function()
 			end
 	
 			if HealthBar.Enabled then
-				EntityESP.HealthLine = Drawing.new('Line')
+				EntityESP.HealthLine = Draw.new('Line')
 				EntityESP.HealthLine.Thickness = 1
 				EntityESP.HealthLine.ZIndex = 2
 				EntityESP.HealthLine.Color = Color3.fromHSV(math.clamp(ent.Health / ent.MaxHealth, 0, 1) / 2.5, 0.89, 0.75)
-				EntityESP.HealthBorder = Drawing.new('Line')
+				EntityESP.HealthBorder = Draw.new('Line')
 				EntityESP.HealthBorder.Thickness = 3
 				EntityESP.HealthBorder.Transparency = 0.35
 				EntityESP.HealthBorder.ZIndex = 1
@@ -3685,20 +3780,20 @@ run(function()
 			
 			if Name.Enabled then
 				if Background.Enabled then
-					EntityESP.TextBKG = Drawing.new('Square')
+					EntityESP.TextBKG = Draw.new('Square')
 					EntityESP.TextBKG.Transparency = 0.35
 					EntityESP.TextBKG.ZIndex = 0
 					EntityESP.TextBKG.Thickness = 1
 					EntityESP.TextBKG.Filled = true
 					EntityESP.TextBKG.Color = Color3.new()
 				end
-				EntityESP.Drop = Drawing.new('Text')
+				EntityESP.Drop = Draw.new('Text')
 				EntityESP.Drop.Color = Color3.new()
 				EntityESP.Drop.Text = ent.Player and whitelist:tag(ent.Player, true)..(DisplayName.Enabled and ent.Player.DisplayName or ent.Player.Name) or ent.Character.Name
 				EntityESP.Drop.ZIndex = 1
 				EntityESP.Drop.Center = true
 				EntityESP.Drop.Size = 20
-				EntityESP.Text = Drawing.new('Text')
+				EntityESP.Text = Draw.new('Text')
 				EntityESP.Text.Text = EntityESP.Drop.Text
 				EntityESP.Text.ZIndex = 2
 				EntityESP.Text.Color = EntityESP.Main.Color
@@ -3715,18 +3810,18 @@ run(function()
 				setthreadidentity(8)
 			end
 			local EntityESP = {}
-			EntityESP.Line1 = Drawing.new('Line')
-			EntityESP.Line2 = Drawing.new('Line')
-			EntityESP.Line3 = Drawing.new('Line')
-			EntityESP.Line4 = Drawing.new('Line')
-			EntityESP.Line5 = Drawing.new('Line')
-			EntityESP.Line6 = Drawing.new('Line')
-			EntityESP.Line7 = Drawing.new('Line')
-			EntityESP.Line8 = Drawing.new('Line')
-			EntityESP.Line9 = Drawing.new('Line')
-			EntityESP.Line10 = Drawing.new('Line')
-			EntityESP.Line11 = Drawing.new('Line')
-			EntityESP.Line12 = Drawing.new('Line')
+			EntityESP.Line1 = Draw.new('Line')
+			EntityESP.Line2 = Draw.new('Line')
+			EntityESP.Line3 = Draw.new('Line')
+			EntityESP.Line4 = Draw.new('Line')
+			EntityESP.Line5 = Draw.new('Line')
+			EntityESP.Line6 = Draw.new('Line')
+			EntityESP.Line7 = Draw.new('Line')
+			EntityESP.Line8 = Draw.new('Line')
+			EntityESP.Line9 = Draw.new('Line')
+			EntityESP.Line10 = Draw.new('Line')
+			EntityESP.Line11 = Draw.new('Line')
+			EntityESP.Line12 = Draw.new('Line')
 	
 			local color = entitylib.getEntityColor(ent) or Color3.fromHSV(Color.Hue, Color.Sat, Color.Value)
 			for _, v in EntityESP do
@@ -3744,15 +3839,15 @@ run(function()
 				setthreadidentity(8)
 			end
 			local EntityESP = {}
-			EntityESP.Head = Drawing.new('Line')
-			EntityESP.HeadFacing = Drawing.new('Line')
-			EntityESP.Torso = Drawing.new('Line')
-			EntityESP.UpperTorso = Drawing.new('Line')
-			EntityESP.LowerTorso = Drawing.new('Line')
-			EntityESP.LeftArm = Drawing.new('Line')
-			EntityESP.RightArm = Drawing.new('Line')
-			EntityESP.LeftLeg = Drawing.new('Line')
-			EntityESP.RightLeg = Drawing.new('Line')
+			EntityESP.Head = Draw.new('Line')
+			EntityESP.HeadFacing = Draw.new('Line')
+			EntityESP.Torso = Draw.new('Line')
+			EntityESP.UpperTorso = Draw.new('Line')
+			EntityESP.LowerTorso = Draw.new('Line')
+			EntityESP.LeftArm = Draw.new('Line')
+			EntityESP.RightArm = Draw.new('Line')
+			EntityESP.LeftLeg = Draw.new('Line')
+			EntityESP.RightLeg = Draw.new('Line')
 	
 			local color = entitylib.getEntityColor(ent) or Color3.fromHSV(Color.Hue, Color.Sat, Color.Value)
 			for _, v in EntityESP do
@@ -3829,6 +3924,10 @@ run(function()
 	local ESPLoop = {
 		Drawing2D = function()
 			for ent, EntityESP in Reference do
+				if not ent.RootPart or not ent.RootPart.Parent then
+					for _, obj in EntityESP do obj.Visible = false end
+					continue
+				end
 				if Distance.Enabled then
 					local distance = entitylib.isAlive and (entitylib.character.RootPart.Position - ent.RootPart.Position).Magnitude or math.huge
 					if distance < DistanceLimit.ValueMin or distance > DistanceLimit.ValueMax then
@@ -3849,8 +3948,8 @@ run(function()
 				end
 				if not rootVis then continue end
 	
-				local topPos = gameCamera:WorldToViewportPoint((CFrame.lookAlong(ent.RootPart.Position, gameCamera.CFrame.LookVector) * CFrame.new(2, ent.HipHeight, 0)).p)
-				local bottomPos = gameCamera:WorldToViewportPoint((CFrame.lookAlong(ent.RootPart.Position, gameCamera.CFrame.LookVector) * CFrame.new(-2, -ent.HipHeight - 1, 0)).p)
+				local topPos = gameCamera:WorldToViewportPoint((CFrame.lookAlong(ent.RootPart.Position, gameCamera.CFrame.LookVector) * CFrame.new(1.4, 2.6, 0)).p)
+				local bottomPos = gameCamera:WorldToViewportPoint((CFrame.lookAlong(ent.RootPart.Position, gameCamera.CFrame.LookVector) * CFrame.new(-1.4, -3.2, 0)).p)
 				local sizex, sizey = math.abs(topPos.X - bottomPos.X), math.abs(topPos.Y - bottomPos.Y)
 				local posx, posy = (rootPos.X - sizex / 2),  ((rootPos.Y - sizey / 2))
 				EntityESP.Main.Position = Vector2.new(posx, posy) // 1
@@ -3883,6 +3982,10 @@ run(function()
 		end,
 		Drawing3D = function()
 			for ent, EntityESP in Reference do
+				if not ent.RootPart or not ent.RootPart.Parent then
+					for _, obj in EntityESP do obj.Visible = false end
+					continue
+				end
 				if Distance.Enabled then
 					local distance = entitylib.isAlive and (entitylib.character.RootPart.Position - ent.RootPart.Position).Magnitude or math.huge
 					if distance < DistanceLimit.ValueMin or distance > DistanceLimit.ValueMax then
@@ -3935,6 +4038,10 @@ run(function()
 		end,
 		DrawingSkeleton = function()
 			for ent, EntityESP in Reference do
+				if not ent.RootPart or not ent.RootPart.Parent then
+					for _, obj in EntityESP do obj.Visible = false end
+					continue
+				end
 				if Distance.Enabled then
 					local distance = entitylib.isAlive and (entitylib.character.RootPart.Position - ent.RootPart.Position).Magnitude or math.huge
 					if distance < DistanceLimit.ValueMin or distance > DistanceLimit.ValueMax then

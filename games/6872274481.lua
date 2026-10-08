@@ -1498,8 +1498,17 @@ run(function()
 
 					if Reach.Enabled or HitBoxes.Enabled then
 						local delta = targetpos - selfpos
-						attackTable.validate.raycast = attackTable.validate.raycast or {}
-						attackTable.validate.selfPosition.value += delta.Magnitude > 0.001 and delta.Unit * math.max(delta.Magnitude - 14.399, 0) or Vector3.zero
+						if delta.Magnitude > 14.399 then
+							local newself = selfpos + delta.Unit * (delta.Magnitude - 14.399)
+							attackTable.validate.selfPosition.value = newself
+							attackTable.validate.raycast = {
+								cameraPosition = {value = newself},
+								cursorDirection = {value = (targetpos - newself).Unit}
+							}
+						elseif attackTable.validate.raycast and attackTable.validate.raycast.cameraPosition then
+							local cam = attackTable.validate.raycast.cameraPosition.value
+							attackTable.validate.raycast.cursorDirection = {value = (targetpos - cam).Unit}
+						end
 					end
 
 					return call:SendToServer(attackTable, ...)
@@ -4838,7 +4847,7 @@ run(function()
 		local aimTarget = targetBodyPart.Position
 		if targetBodyPart.Name ~= 'Head' and plr.RootPart then
 			local rootY = plr.RootPart.Position.Y
-			aimTarget = Vector3.new(aimTarget.X, math.clamp(aimTarget.Y + (targetBodyPart == plr.RootPart and 1 or 0), rootY + 0.3, rootY + 2), aimTarget.Z)
+			aimTarget = Vector3.new(aimTarget.X, math.clamp(aimTarget.Y, rootY - 1, rootY + 1), aimTarget.Z)
 		end
 		local _map = workspace:FindFirstChild('Map')
 		if _map then rayCheck.FilterDescendantsInstances = {_map} end
@@ -6437,10 +6446,8 @@ run(function()
 		local hp = t.Humanoid and t.Humanoid.Health or t.Health
 		if type(hp) == 'number' and hp <= 0 then return nil end
 		if (t.RootPart.Position - originPos).Magnitude > Range.Value then return nil end
-		local screen, visible = gameCamera:WorldToViewportPoint(t.RootPart.Position)
+		local _, visible = gameCamera:WorldToViewportPoint(t.RootPart.Position)
 		if not visible then return nil end
-		local mousePos = inputService.TouchEnabled and (gameCamera.ViewportSize / 2) or inputService:GetMouseLocation()
-		if (Vector2.new(screen.X, screen.Y) - mousePos).Magnitude > FOV.Value then return nil end
 		return t
 	end
 
@@ -6694,11 +6701,11 @@ run(function()
 					local aimTarget = targetBodyPart.Position
 		if targetBodyPart.Name ~= 'Head' and plr.RootPart then
 			local rootY = plr.RootPart.Position.Y
-			aimTarget = Vector3.new(aimTarget.X, math.clamp(aimTarget.Y + (targetBodyPart == plr.RootPart and 1 or 0), rootY + 0.3, rootY + 2), aimTarget.Z)
+			aimTarget = Vector3.new(aimTarget.X, math.clamp(aimTarget.Y, rootY - 1, rootY + 1), aimTarget.Z)
 		end
 					if targetBodyPart.Name ~= 'Head' and plr.RootPart then
 						local rootY = plr.RootPart.Position.Y
-						aimTarget = Vector3.new(aimTarget.X, math.clamp(aimTarget.Y + (targetBodyPart == plr.RootPart and 1 or 0), rootY + 0.3, rootY + 2), aimTarget.Z)
+						aimTarget = Vector3.new(aimTarget.X, math.clamp(aimTarget.Y, rootY - 1, rootY + 1), aimTarget.Z)
 					end
 					local solverVelocity = projmeta.projectile == 'telepearl' and Vector3.zero or rawVel
 					local tHum = plr.Character and plr.Character:FindFirstChildOfClass('Humanoid')
@@ -6782,7 +6789,7 @@ run(function()
 						if c0 and f0 then
 							calc, flightTime = c0, f0
 							if not worldmeta and not prediction.IsTrajectoryClear(s0, (c0 - solveOrigin).Unit * projSpeed, gravity, f0 * 0.97, rayCheck) then
-								for _, dy in {0.8, 1.6, -0.8, 2.2, -1.6} do
+								for _, dy in {0.8, -0.8, 1.6, -1.6} do
 									local c3, f3, s3 = aimFrom(dy)
 									if c3 and f3 and prediction.IsTrajectoryClear(s3, (c3 - solveOrigin).Unit * projSpeed, gravity, f3 * 0.97, rayCheck) then
 										calc, flightTime = c3, f3
@@ -7089,6 +7096,7 @@ run(function()
 	local kaLastSend = 0
 	local kaLastSendSrv = 0
 	local fhLastShotTime = 0
+	local fhEquipBudget = {tokens = 4, stamp = tick()}
 	local fhBusySince = 0
 	local fhBusyToken = 0
 	local fhLastImpact = 0
@@ -7439,6 +7447,22 @@ run(function()
 		return math.acos(math.clamp(flatLook.Unit:Dot(flat.Unit), -1, 1)) <= math.rad(AngleSlider.Value) / 2
 	end
 
+	local function fhForceSword()
+		local sw = getSword()
+		if not sw or not sw.tool or not sw.tool.Parent then return end
+		store.tools.sword = sw
+		local hand = lplr.Character and lplr.Character:FindFirstChild('HandInvItem')
+		if hand then
+			hand.Value = sw.tool
+		end
+		store._fhRestoreAt = tick()
+		task.spawn(function()
+			pcall(function()
+				bedwars.Client:Get(remotes.EquipItem):CallServerAsync({hand = sw.tool})
+			end)
+		end)
+	end
+
 	local function fhEquipAwait(tool)
 		if not tool or not tool.Parent then return false end
 		local hand = lplr.Character and lplr.Character:FindFirstChild('HandInvItem')
@@ -7446,9 +7470,12 @@ run(function()
 		if hand.Value == tool then return true end
 
 		local ok, accepted = pcall(function()
-			return bedwars.Client:Get(remotes.EquipItem):CallServerAsync({hand = tool}):await()
+			return bedwars.Client:Get(remotes.EquipItem):CallServerAsync({hand = tool}):timeout(0.35):await()
 		end)
-		if not ok or accepted == false then return false end
+		if not ok or accepted == false then
+			fhForceSword()
+			return false
+		end
 
 		hand.Value = tool
 		return true
@@ -7515,9 +7542,12 @@ run(function()
 		end
 
 		local ok, accepted = pcall(function()
-			return bedwars.Client:Get(remotes.EquipItem):CallServerAsync({hand = sw.tool}):await()
+			return bedwars.Client:Get(remotes.EquipItem):CallServerAsync({hand = sw.tool}):timeout(0.35):await()
 		end)
-		if not ok or accepted == false then return false end
+		if not ok or accepted == false then
+			fhForceSword()
+			return false
+		end
 
 		hand.Value = sw.tool
 		store._fhRestoreAt = tick()
@@ -7802,7 +7832,7 @@ run(function()
 		local solverVel = rawVel
 		local hip = ent.HipHeight or 2
 		local aimPart = targetPart
-		local aimOffset = 1
+		local aimOffset = hip * 0.15
 
 		do
 			local itype = tostring(item.itemType)
@@ -7825,7 +7855,7 @@ run(function()
 			elseif itype:find('rocket') or itype:find('launcher') or itype:find('firework') then
 				aimOffset = 0
 			elseif meta.arrow then
-				aimOffset = 1
+				aimOffset = hip * 0.15
 			elseif itype:find('snowball') or itype:find('chakram') or itype:find('spell') then
 				aimOffset = hip * 0.3
 			end
@@ -7931,14 +7961,6 @@ run(function()
 		end
 
 		local launchValues
-
-		pcall(function()
-			launchValues = bedwars.ProjectileController:calculateImportantLaunchValues(
-				launchHandler,
-				false,
-				item.tool
-			)
-		end)
 
 		if launchValues
 			and launchValues.positionFrom
@@ -8343,7 +8365,7 @@ run(function()
 		smoothVel = Vector3.new(smoothVel.X, rawVel.Y, smoothVel.Z)
 
 		local playerGravity = targetGravity(ent)
-		local aimPos = targetPart.Position + Vector3.new(0, 0.8, 0)
+		local aimPos = targetPart.Position
 
 		setFHFilter(ent.Character)
 
@@ -8646,6 +8668,14 @@ run(function()
 			return
 		end
 
+		local budgetNow = tick()
+		fhEquipBudget.tokens = math.min(fhEquipBudget.tokens + (budgetNow - fhEquipBudget.stamp) * 4, 4)
+		fhEquipBudget.stamp = budgetNow
+		if fhEquipBudget.tokens < 2 then
+			return
+		end
+		fhEquipBudget.tokens -= 2
+
 		fhLastShotTime = srvNow
 		local fired
 
@@ -8653,6 +8683,17 @@ run(function()
 			fired = doFastHitsLegitSwitch(ent)
 		else
 			fired = doFastHitsNEW(ent, meleeRange)
+		end
+		if fired then
+			local kinds = 0
+			for _, opt in {Gloops, Arrows, Fireball, Kits} do
+				if opt and opt.Enabled then
+					kinds += 1
+				end
+			end
+			if kinds > 1 then
+				fhLastShotTime = srvNow + 0.5
+			end
 		end
 	end
 
@@ -8721,6 +8762,7 @@ run(function()
 	end
 
 	local strike = {nextAt = 0, interval = nil, cooldown = 0.3, lastSrv = 0, used = 0, frame = 1 / 60, minr = 0.982, log = {}, good = 0, total = 0, since = 0}
+	local RangeCircle, rangeRing
 	local probe = {buf = {}, stats = {}, nextFlush = 0, started = os.clock(), sendTimes = {}, lastLand = nil}
 
 	local function probeLine(text)
@@ -9128,11 +9170,23 @@ run(function()
 						local myRoot = entitylib.character.RootPart
 						myRoot.CFrame = CFrame.lookAt(myRoot.Position, Vector3.new(look.X, myRoot.Position.Y + 0.001, look.Z))
 					end
+					if rangeRing then
+						local ringRoot = entitylib.isAlive and entitylib.character.RootPart or nil
+						rangeRing.Adornee = ringRoot
+						if ringRoot then
+							rangeRing.CFrame = CFrame.new(0, 0.1 - entitylib.character.HipHeight, 0) * CFrame.Angles(math.rad(90), 0, 0)
+							rangeRing.Radius = AttackRange.Value
+							rangeRing.InnerRadius = math.max(AttackRange.Value - 0.25, 0)
+						end
+					end
 					strike.frame = strike.frame * 0.9 + math.clamp(runService.Heartbeat:Wait(), 0.003, 0.05) * 0.1
 				until not Killaura.Enabled
 			else
 				stopAutoShootLoop()
 				setSwingBuffer(false)
+				if rangeRing then
+					rangeRing.Adornee = nil
+				end
 				lastTargetTime = 0
 				store.KillauraTarget = nil
 				for _, box in auraBoxes do
@@ -9634,6 +9688,25 @@ run(function()
 		Default = 100,
 		Darker = true,
 		Visible = false
+	})
+	RangeCircle = Killaura:CreateToggle({
+		Name = 'range visualiser',
+		Tooltip = 'shows ur attack range on the ground',
+		Function = function(callback)
+			if callback then
+				if not rangeRing then
+					rangeRing = Instance.new('CylinderHandleAdornment')
+					rangeRing.Height = 0.05
+					rangeRing.Transparency = 0.4
+					rangeRing.Color3 = Color3.fromRGB(120, 170, 255)
+					rangeRing.ZIndex = 0
+					rangeRing.Parent = gameCamera
+				end
+			elseif rangeRing then
+				rangeRing:Destroy()
+				rangeRing = nil
+			end
+		end
 	})
 
 	task.defer(function()

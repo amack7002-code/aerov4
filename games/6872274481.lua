@@ -17948,6 +17948,11 @@ run(function()
 	local TeamUpgrade
 	local WrenShop
 	local GUICheck
+	local ShopUICheck
+	local TierCheck
+	local SmartCheck
+	local BedwarsCheck
+	local BuySwordToggle
 	local BuyArmorToggle
 	local BuyAxeToggle
 	local BuyPickaxeToggle
@@ -17961,6 +17966,50 @@ run(function()
 	local DiamondGenToggle
 	local TeamGenToggle
 	local BedBarrierToggle
+	local Custom = {}
+	local CustomPost = {}
+	local ExtraUpgrades = {}
+	local id
+
+	local armors = {
+		'none',
+		'leather_chestplate',
+		'iron_chestplate',
+		'diamond_chestplate',
+		'emerald_chestplate'
+	}
+
+	local axes = {
+		'none',
+		'wood_axe',
+		'stone_axe',
+		'iron_axe',
+		'diamond_axe',
+		'emerald_axe'
+	}
+
+	local pickaxes = {
+		'none',
+		'wood_pickaxe',
+		'stone_pickaxe',
+		'iron_pickaxe',
+		'diamond_pickaxe',
+		'emerald_pickaxe'
+	}
+
+	local function getSwordList()
+		local list = {'wood_sword', 'stone_sword', 'iron_sword', 'diamond_sword', 'emerald_sword'}
+		if store.equippedKit == 'dasher' then
+			list = {'wood_dao', 'stone_dao', 'iron_dao', 'diamond_dao', 'emerald_dao'}
+		elseif store.equippedKit == 'ice_queen' then
+			list[5] = 'ice_sword'
+		elseif store.equippedKit == 'ember' then
+			list[5] = 'infernal_saber'
+		elseif store.equippedKit == 'lumen' then
+			list[5] = 'light_sword'
+		end
+		return list
+	end
 
 	local purchaseRemote
 	local function getPurchaseRemote()
@@ -17969,6 +18018,9 @@ run(function()
 		end
 		return purchaseRemote
 	end
+
+	local upgradeRemote = replicatedStorage:WaitForChild("rbxts_include"):WaitForChild("node_modules"):WaitForChild("@rbxts"):WaitForChild("net"):WaitForChild("out"):WaitForChild("_NetManaged"):WaitForChild("RequestPurchaseTeamUpgrade")
+	local bedUpgradeRemote = replicatedStorage:WaitForChild("rbxts_include"):WaitForChild("node_modules"):WaitForChild("@rbxts"):WaitForChild("net"):WaitForChild("out"):WaitForChild("_NetManaged"):WaitForChild("RequestPurchaseBedTeamUpgrade")
 
 	local function getResourceCount(currency)
 		local item = getItem(currency)
@@ -17987,94 +18039,147 @@ run(function()
 		return false
 	end
 
-	local function isNearShop(checkType)
-		if not GUICheck.Enabled then return true end
-		local _, items, upgrades = getShopNPC()
-		if checkType == 'item' then return items end
-		if checkType == 'upgrade' then return upgrades end
-		return false
+	local function canBuy(item, currencytable, amount)
+		amount = amount or 1
+		if not currencytable[item.currency] then
+			local currency = getItem(item.currency)
+			currencytable[item.currency] = currency and currency.amount or 0
+		end
+		if item.ignoredByKit and table.find(item.ignoredByKit, store.equippedKit or '') then return false end
+		if item.lockedByForge or item.disabled then return false end
+		if item.require and item.require.teamUpgrade then
+			if (bedwars.Store:getState().Bedwars.teamUpgrades[item.require.teamUpgrade.upgradeId] or -1) < item.require.teamUpgrade.lowestTierIndex then
+				return false
+			end
+		end
+		return currencytable[item.currency] >= (item.price * amount)
 	end
 
-	local function buyItem(shopItem, shopId)
-		pcall(function()
-			getPurchaseRemote():InvokeServer({shopItem = shopItem, shopId = shopId})
+	local function buyItem(item, currencytable, shopId)
+		shopId = shopId or id
+		if not shopId then return end
+		local meta = bedwars.ItemMeta[item.itemType]
+		notif('AutoBuy', 'Bought '..(meta and meta.displayName or item.itemType), 3)
+		bedwars.Client:Get('BedwarsPurchaseItem'):CallServerAsync({
+			shopItem = item,
+			shopId = shopId
+		}):andThen(function(suc)
+			if suc then
+				bedwars.SoundManager:playSound(bedwars.SoundList.BEDWARS_PURCHASE_ITEM)
+				bedwars.Store:dispatch({
+					type = 'BedwarsAddItemPurchased',
+					itemType = item.itemType
+				})
+				bedwars.BedwarsShopController.alreadyPurchasedMap[item.itemType] = true
+			end
 		end)
+		currencytable[item.currency] -= item.price
 	end
 
-	local function getShopData(itemType)
-		if not bedwars.Shop then return nil end
-		local ok, res = pcall(function()
-			return bedwars.Shop.getShopItem(itemType, lplr)
-		end)
-		return ok and res or nil
-	end
+	local function buyTool(tool, tools, currencytable)
+		local buyable
+		local start = 1
+		if tool and tool.itemType and tool.itemType ~= 'none' then
+			local ind = table.find(tools, tool.itemType)
+			if not ind then return end
+			start = ind + 1
+		elseif tools[1] == 'none' then
+			start = 2
+		end
 
-	local armorTiers = {
-		'emerald_chestplate','emerald_leggings','emerald_boots',
-		'diamond_chestplate','diamond_leggings','diamond_boots',
-		'iron_chestplate','iron_leggings','iron_boots',
-		'leather_chestplate',
-	}
-	local axeTiers = {'emerald_axe','diamond_axe','iron_axe','stone_axe','wood_axe'}
-	local pickaxeTiers = {'emerald_pickaxe','diamond_pickaxe','iron_pickaxe','stone_pickaxe','wood_pickaxe'}
-
-	local function buyBestTier(tierList, shopId)
-		for _, itemType in ipairs(tierList) do
-			if playerOwns(itemType) then break end
-			local data = getShopData(itemType)
-			if data then
-				if getResourceCount(data.currency or 'iron') >= (data.price or math.huge) then
-					buyItem(data, shopId)
-					break
+		for i = start, #tools do
+			local v = bedwars.Shop.getShopItem(tools[i], lplr)
+			if v then
+				if canBuy(v, currencytable) then
+					if SmartCheck.Enabled and (bedwars.ItemMeta[tools[i]] or {}).breakBlock and i > 2 then
+						if BuyArmorToggle.Enabled then
+							local armor = store.inventory.inventory.armor
+							local currentarmor = armor and armor[2] ~= 'empty' and armor[2] or getBestArmor(1)
+							currentarmor = currentarmor and currentarmor.itemType or 'none'
+							if (table.find(armors, currentarmor) or 3) < 3 then break end
+						end
+						if BuySwordToggle.Enabled then
+							if store.tools.sword and (table.find(getSwordList(), store.tools.sword.itemType) or 2) < 2 then break end
+						end
+					end
+					buyable = v
 				end
+				if TierCheck.Enabled and v.nextTier then break end
+			end
+		end
+
+		if buyable then
+			buyItem(buyable, currencytable)
+		end
+	end
+
+	local function buyUpgrade(upgradeType, currencytable)
+		local upgrade = bedwars.TeamUpgradeMeta[upgradeType]
+		if not upgrade or not upgrade.tiers then return end
+		if upgrade.disabledInQueue and table.find(upgrade.disabledInQueue, store.queueType) then return end
+		local currentUpgrades = bedwars.Store:getState().Bedwars.teamUpgrades[lplr:GetAttribute('Team')] or {}
+		local currentTier = (currentUpgrades[upgradeType] or 0) + 1
+
+		for i = currentTier, #upgrade.tiers do
+			local tier = upgrade.tiers[i]
+			if tier.availableOnlyInQueue and not table.find(tier.availableOnlyInQueue, store.queueType) then continue end
+
+			if canBuy({currency = 'diamond', price = tier.cost}, currencytable) then
+				notif('AutoBuy', 'Bought '..(upgrade.name == 'Armor' and 'Protection' or upgrade.name)..' '..i, 3)
+				pcall(function()
+					upgradeRemote:InvokeServer(upgradeType)
+				end)
+				currencytable.diamond -= tier.cost
+			else
+				break
 			end
 		end
 	end
 
-	local function buyProjectile(shopId)
-		local em = getResourceCount('emerald')
-		local ir = getResourceCount('iron')
-		local ownsAny = playerOwns('headhunter') or playerOwns('wood_crossbow') or playerOwns('wood_bow')
-		if ownsAny then return end
+	local function buyProjectile(currencytable)
+		if playerOwns('headhunter') or playerOwns('wood_crossbow') or playerOwns('wood_bow') then return end
 
-		if em >= 24 then
-			buyItem({
+		for _, v in {
+			{
 				lockAfterPurchase = true, itemType = "headhunter", price = 24,
 				currency = "emerald", amount = 1,
 				disabledInQueue = {"tnt_wars","bedwars_og_to4"}, category = "Combat",
 				spawnWithItems = {"headhunter"},
 				ignoredByKit = {"archer","flower_bee","falconer","nazar"}
-			}, shopId)
-		elseif em >= 7 then
-			buyItem({
+			},
+			{
 				disabledInQueue = {"tnt_wars","bedwars_og_to4"},
 				itemType = "wood_crossbow", price = 7,
 				superiorItems = {"headhunter"}, currency = "emerald",
 				category = "Combat", lockAfterPurchase = true,
 				ignoredByKit = {"archer","flower_bee","falconer","nazar"},
 				spawnWithItems = {"wood_crossbow"}, amount = 1
-			}, shopId)
-		elseif ir >= 24 then
-			buyItem({
+			},
+			{
 				ignoredByKit = {"flower_bee","falconer","nazar"},
 				itemType = "wood_bow", price = 24,
 				superiorItems = {"wood_crossbow","tactical_crossbow"},
 				currency = "iron", category = "Combat", lockAfterPurchase = true,
 				spawnWithItems = {"wood_bow"}, amount = 1
-			}, shopId)
+			}
+		} do
+			if canBuy(v, currencytable) then
+				buyItem(v, currencytable)
+				return
+			end
 		end
 	end
 
 	local function getNearestShopId()
 		if not entitylib.isAlive then return nil end
 		local localPosition = entitylib.character.RootPart.Position
-		local id
+		local shopId
 		for _, v in store.shop do
 			if v.Shop and v.RootPart and (v.RootPart.Position - localPosition).Magnitude <= 20 then
-				id = v.Id
+				shopId = v.Id
 			end
 		end
-		return id
+		return shopId
 	end
 
 	local function buyPotion(itemType)
@@ -18085,30 +18190,13 @@ run(function()
 		end)
 		if not ok or not item then return end
 		if getResourceCount(item.currency or 'iron') < (item.price or math.huge) then return end
-		buyItem(item, shopId)
-	end
-
-	local upgradeIds = {
-		BreakSpeed = 'BREAK_SPEED',
-		Armor      = 'ARMOR',
-		Damage     = 'DAMAGE',
-		DiamondGen = 'DIAMOND_GENERATOR',
-		TeamGen    = 'TEAM_GENERATOR',
-	}
-
-	local upgradeRemote = replicatedStorage:WaitForChild("rbxts_include"):WaitForChild("node_modules"):WaitForChild("@rbxts"):WaitForChild("net"):WaitForChild("out"):WaitForChild("_NetManaged"):WaitForChild("RequestPurchaseTeamUpgrade")
-
-	local function buyTeamUpgrade(upgradeType)
-		if not upgradeType then return end
 		pcall(function()
-			upgradeRemote:InvokeServer(upgradeType)
+			getPurchaseRemote():InvokeServer({shopItem = item, shopId = shopId})
 		end)
 	end
 
 	local lastBedBarrierBuy = 0
 	local BED_BARRIER_DURATION = 180
-
-	local bedUpgradeRemote = replicatedStorage:WaitForChild("rbxts_include"):WaitForChild("node_modules"):WaitForChild("@rbxts"):WaitForChild("net"):WaitForChild("out"):WaitForChild("_NetManaged"):WaitForChild("RequestPurchaseBedTeamUpgrade")
 
 	local function buyBedBarrier()
 		local now = tick()
@@ -18122,6 +18210,25 @@ run(function()
 		end
 	end
 
+	local function runCustom(tab, currencytable)
+		local keys = {}
+		for k in tab do
+			table.insert(keys, k)
+		end
+		table.sort(keys)
+		for _, k in keys do
+			tab[k](currencytable)
+		end
+	end
+
+	local upgradeIds = {
+		BreakSpeed = 'BREAK_SPEED',
+		Armor      = 'ARMOR',
+		Damage     = 'DAMAGE',
+		DiamondGen = 'DIAMOND_GENERATOR',
+		TeamGen    = 'TEAM_GENERATOR',
+	}
+
 	AutoBuy = vape.Categories.Utility:CreateModule({
 		Name = 'AutoBuy',
 		Function = function(callback)
@@ -18132,25 +18239,61 @@ run(function()
 					repeat
 						task.wait(0.5)
 						if not entitylib.isAlive then continue end
+						if store.matchState == 2 then continue end
+						if not store.shopLoaded then continue end
+						if BedwarsCheck.Enabled and not tostring(store.queueType):find('bedwars') then continue end
+						if ShopUICheck.Enabled and not (bedwars.AppController:isAppOpen('BedwarsItemShopApp') or bedwars.AppController:isAppOpen('TeamUpgradeApp')) then continue end
+
+						local _, items, upgrades, newid = getShopNPC()
+						id = newid or (not GUICheck.Enabled and '1_item_shop' or nil)
+						local canItems = items or not GUICheck.Enabled
+						local canUpgrades = upgrades or not GUICheck.Enabled
+						local currencytable = {}
+
+						if canItems then
+							runCustom(Custom, currencytable)
+						end
+
+						if ItemShop.Enabled and canItems then
+							if BuyArmorToggle.Enabled then
+								local armor = store.inventory.inventory.armor
+								local currentarmor = armor and armor[2] ~= 'empty' and armor[2] or getBestArmor(1)
+								buyTool(currentarmor, armors, currencytable)
+							end
+							if BuySwordToggle.Enabled then
+								buyTool(store.tools.sword, getSwordList(), currencytable)
+							end
+							if BuyAxeToggle.Enabled then
+								buyTool(store.tools.wood or {itemType = 'none'}, axes, currencytable)
+							end
+							if BuyPickaxeToggle.Enabled then
+								buyTool(store.tools.stone, pickaxes, currencytable)
+							end
+							if BuyProjectileToggle.Enabled then
+								buyProjectile(currencytable)
+							end
+						end
+
+						if TeamUpgrade.Enabled and canUpgrades then
+							if BreakSpeedToggle.Enabled   then buyUpgrade(upgradeIds.BreakSpeed, currencytable) end
+							if ArmorUpgradeToggle.Enabled then buyUpgrade(upgradeIds.Armor, currencytable) end
+							if DamageToggle.Enabled        then buyUpgrade(upgradeIds.Damage, currencytable) end
+							if DiamondGenToggle.Enabled    then buyUpgrade(upgradeIds.DiamondGen, currencytable) end
+							if TeamGenToggle.Enabled       then buyUpgrade(upgradeIds.TeamGen, currencytable) end
+							for _, v in ExtraUpgrades do
+								if v.toggle.Enabled then buyUpgrade(v.id, currencytable) end
+							end
+							if BedBarrierToggle.Enabled then buyBedBarrier() end
+						end
+
 						if WrenShop.Enabled then
 							if BuySerpentToggle.Enabled then buyPotion('serpents_touch_potion') end
 							if BuyJumpToggle.Enabled then buyPotion('jump_potion') end
 							if BuyShieldToggle.Enabled then buyPotion('mini_shield') end
 						end
-						if ItemShop.Enabled and isNearShop('item') then
-							local sid = "1_item_shop"
-							if BuyArmorToggle.Enabled then buyBestTier(armorTiers, sid) end
-							if BuyAxeToggle.Enabled then buyBestTier(axeTiers, sid) end
-							if BuyPickaxeToggle.Enabled then buyBestTier(pickaxeTiers, sid) end
-							if BuyProjectileToggle.Enabled then buyProjectile(sid) end
-						end
-						if TeamUpgrade.Enabled and isNearShop('upgrade') then
-							if BreakSpeedToggle.Enabled   then buyTeamUpgrade(upgradeIds.BreakSpeed) end
-							if ArmorUpgradeToggle.Enabled then buyTeamUpgrade(upgradeIds.Armor) end
-							if DamageToggle.Enabled        then buyTeamUpgrade(upgradeIds.Damage) end
-							if DiamondGenToggle.Enabled    then buyTeamUpgrade(upgradeIds.DiamondGen) end
-							if TeamGenToggle.Enabled       then buyTeamUpgrade(upgradeIds.TeamGen) end
-							if BedBarrierToggle.Enabled then buyBedBarrier() end
+
+						if canItems then
+							runCustom(CustomPost, currencytable)
 						end
 					until not AutoBuy.Enabled
 				end)
@@ -18164,10 +18307,11 @@ run(function()
 		Default = true,
 		Tooltip = 'buys gear from the item shop when ur near it',
 		Function = function(v)
-			if BuyArmorToggle     then BuyArmorToggle.Object.Visible     = v end
-			if BuyAxeToggle       then BuyAxeToggle.Object.Visible       = v end
-			if BuyPickaxeToggle   then BuyPickaxeToggle.Object.Visible   = v end
-			if BuyProjectileToggle then BuyProjectileToggle.Object.Visible = v end
+			if BuySwordToggle       then BuySwordToggle.Object.Visible       = v end
+			if BuyArmorToggle       then BuyArmorToggle.Object.Visible       = v end
+			if BuyAxeToggle         then BuyAxeToggle.Object.Visible         = v end
+			if BuyPickaxeToggle     then BuyPickaxeToggle.Object.Visible     = v end
+			if BuyProjectileToggle  then BuyProjectileToggle.Object.Visible  = v end
 		end
 	})
 
@@ -18182,6 +18326,9 @@ run(function()
 			if DiamondGenToggle   then DiamondGenToggle.Object.Visible   = v end
 			if TeamGenToggle      then TeamGenToggle.Object.Visible      = v end
 			if BedBarrierToggle   then BedBarrierToggle.Object.Visible   = v end
+			for _, t in ExtraUpgrades do
+				if t.toggle.Object then t.toggle.Object.Visible = v end
+			end
 		end
 	})
 
@@ -18202,30 +18349,105 @@ run(function()
 		Tooltip = 'only buys when ur near the shop'
 	})
 
-	BuyArmorToggle     = AutoBuy:CreateToggle({Name = 'Buy Armor',      Default = true, Darker = true})
-	BuyAxeToggle       = AutoBuy:CreateToggle({Name = 'Buy Axe',        Default = false, Darker = true})
-	BuyPickaxeToggle   = AutoBuy:CreateToggle({Name = 'Buy Pickaxe',    Default = false, Darker = true})
-	BuyProjectileToggle = AutoBuy:CreateToggle({Name = 'Buy Projectile', Default = false, Darker = true})
-	BuySerpentToggle   = AutoBuy:CreateToggle({Name = 'Buy Serpent Potion',     Default = false, Darker = true})
-	BuyJumpToggle      = AutoBuy:CreateToggle({Name = 'Buy Jump Potion',        Default = false, Darker = true})
-	BuyShieldToggle    = AutoBuy:CreateToggle({Name = 'Buy Shield Potion',      Default = false, Darker = true})
-	BreakSpeedToggle   = AutoBuy:CreateToggle({Name = 'Break Speed',  Default = false, Darker = true})
-	ArmorUpgradeToggle = AutoBuy:CreateToggle({Name = 'Armor',        Default = false, Darker = true})
-	DamageToggle       = AutoBuy:CreateToggle({Name = 'Damage',       Default = false, Darker = true})
-	DiamondGenToggle   = AutoBuy:CreateToggle({Name = 'Diamond Gen',  Default = false, Darker = true})
-	TeamGenToggle      = AutoBuy:CreateToggle({Name = 'Team Gen',     Default = false, Darker = true})
-	BedBarrierToggle   = AutoBuy:CreateToggle({Name = 'Bed Barrier',  Default = false, Darker = true})
+	ShopUICheck = AutoBuy:CreateToggle({
+		Name = 'Shop UI Check',
+		Tooltip = 'only buys while the shop menu is open'
+	})
+
+	TierCheck = AutoBuy:CreateToggle({
+		Name = 'Tier Check',
+		Tooltip = 'only buys one tool tier at a time'
+	})
+
+	SmartCheck = AutoBuy:CreateToggle({
+		Name = 'Smart Check',
+		Default = true,
+		Tooltip = 'Buys iron armor before iron axe'
+	})
+
+	BedwarsCheck = AutoBuy:CreateToggle({
+		Name = 'Only Bedwars',
+		Default = true,
+		Tooltip = 'only buys in bedwars queues'
+	})
+
+	BuySwordToggle       = AutoBuy:CreateToggle({Name = 'Buy Sword',        Default = false, Darker = true})
+	BuyArmorToggle       = AutoBuy:CreateToggle({Name = 'Buy Armor',        Default = true,  Darker = true})
+	BuyAxeToggle         = AutoBuy:CreateToggle({Name = 'Buy Axe',          Default = false, Darker = true})
+	BuyPickaxeToggle     = AutoBuy:CreateToggle({Name = 'Buy Pickaxe',      Default = false, Darker = true})
+	BuyProjectileToggle  = AutoBuy:CreateToggle({Name = 'Buy Projectile',   Default = false, Darker = true})
+	BuySerpentToggle     = AutoBuy:CreateToggle({Name = 'Buy Serpent Potion', Default = false, Darker = true})
+	BuyJumpToggle        = AutoBuy:CreateToggle({Name = 'Buy Jump Potion',  Default = false, Darker = true})
+	BuyShieldToggle      = AutoBuy:CreateToggle({Name = 'Buy Shield Potion', Default = false, Darker = true})
+	BreakSpeedToggle     = AutoBuy:CreateToggle({Name = 'Break Speed',      Default = false, Darker = true})
+	ArmorUpgradeToggle   = AutoBuy:CreateToggle({Name = 'Armor',            Default = false, Darker = true})
+	DamageToggle         = AutoBuy:CreateToggle({Name = 'Damage',           Default = false, Darker = true})
+	DiamondGenToggle     = AutoBuy:CreateToggle({Name = 'Diamond Gen',      Default = false, Darker = true})
+	TeamGenToggle        = AutoBuy:CreateToggle({Name = 'Team Gen',         Default = false, Darker = true})
+	BedBarrierToggle     = AutoBuy:CreateToggle({Name = 'Bed Barrier',      Default = false, Darker = true})
+
+	local coveredUpgrades = {}
+	for _, v in upgradeIds do
+		coveredUpgrades[v] = true
+	end
+	for i, v in bedwars.TeamUpgradeMeta do
+		if not coveredUpgrades[i] then
+			table.insert(ExtraUpgrades, {
+				id = i,
+				toggle = AutoBuy:CreateToggle({
+					Name = 'Buy '..(v.name == 'Armor' and 'Protection' or v.name),
+					Darker = true
+				})
+			})
+		end
+	end
+
+	AutoBuy:CreateTextList({
+		Name = 'Item',
+		Placeholder = 'priority/item/amount/after',
+		Function = function(list)
+			table.clear(Custom)
+			table.clear(CustomPost)
+			for _, entry in list do
+				local tab = entry:split('/')
+				local ind = tonumber(tab[1])
+				if ind and tab[2] then
+					(tab[4] and CustomPost or Custom)[ind] = function(currencytable)
+						local v = bedwars.Shop.getShopItem(tab[2], lplr)
+						if not v then return end
+						local amount = tonumber(tab[3]) or 1
+						local woolName = (tab[2] == 'wool_white' and bedwars.Shop.getTeamWool) and bedwars.Shop.getTeamWool(lplr:GetAttribute('Team')) or tab[2]
+						local item = getItem(woolName or tab[2])
+						local count = (item and (amount - item.amount) or amount) // (v.amount or 1)
+						if count > 0 and canBuy(v, currencytable, count) then
+							for _ = 1, count do
+								buyItem(v, currencytable)
+							end
+						end
+					end
+				end
+			end
+		end
+	})
 
 	task.defer(function()
-		if BuySerpentToggle   and BuySerpentToggle.Object   then BuySerpentToggle.Object.Visible   = WrenShop.Enabled end
-		if BuyJumpToggle      and BuyJumpToggle.Object      then BuyJumpToggle.Object.Visible      = WrenShop.Enabled end
-		if BuyShieldToggle    and BuyShieldToggle.Object    then BuyShieldToggle.Object.Visible    = WrenShop.Enabled end
-		if BreakSpeedToggle   and BreakSpeedToggle.Object   then BreakSpeedToggle.Object.Visible   = TeamUpgrade.Enabled end
-		if ArmorUpgradeToggle and ArmorUpgradeToggle.Object then ArmorUpgradeToggle.Object.Visible = TeamUpgrade.Enabled end
-		if DamageToggle       and DamageToggle.Object       then DamageToggle.Object.Visible       = TeamUpgrade.Enabled end
-		if DiamondGenToggle   and DiamondGenToggle.Object   then DiamondGenToggle.Object.Visible   = TeamUpgrade.Enabled end
-		if TeamGenToggle      and TeamGenToggle.Object      then TeamGenToggle.Object.Visible      = TeamUpgrade.Enabled end
-		if BedBarrierToggle   and BedBarrierToggle.Object   then BedBarrierToggle.Object.Visible   = TeamUpgrade.Enabled end
+		if BuySwordToggle       and BuySwordToggle.Object       then BuySwordToggle.Object.Visible       = ItemShop.Enabled end
+		if BuyArmorToggle       and BuyArmorToggle.Object       then BuyArmorToggle.Object.Visible       = ItemShop.Enabled end
+		if BuyAxeToggle         and BuyAxeToggle.Object         then BuyAxeToggle.Object.Visible         = ItemShop.Enabled end
+		if BuyPickaxeToggle     and BuyPickaxeToggle.Object     then BuyPickaxeToggle.Object.Visible     = ItemShop.Enabled end
+		if BuyProjectileToggle  and BuyProjectileToggle.Object  then BuyProjectileToggle.Object.Visible  = ItemShop.Enabled end
+		if BuySerpentToggle     and BuySerpentToggle.Object     then BuySerpentToggle.Object.Visible     = WrenShop.Enabled end
+		if BuyJumpToggle        and BuyJumpToggle.Object        then BuyJumpToggle.Object.Visible        = WrenShop.Enabled end
+		if BuyShieldToggle      and BuyShieldToggle.Object      then BuyShieldToggle.Object.Visible      = WrenShop.Enabled end
+		if BreakSpeedToggle     and BreakSpeedToggle.Object     then BreakSpeedToggle.Object.Visible     = TeamUpgrade.Enabled end
+		if ArmorUpgradeToggle   and ArmorUpgradeToggle.Object   then ArmorUpgradeToggle.Object.Visible   = TeamUpgrade.Enabled end
+		if DamageToggle         and DamageToggle.Object         then DamageToggle.Object.Visible         = TeamUpgrade.Enabled end
+		if DiamondGenToggle     and DiamondGenToggle.Object     then DiamondGenToggle.Object.Visible     = TeamUpgrade.Enabled end
+		if TeamGenToggle        and TeamGenToggle.Object        then TeamGenToggle.Object.Visible        = TeamUpgrade.Enabled end
+		if BedBarrierToggle     and BedBarrierToggle.Object     then BedBarrierToggle.Object.Visible     = TeamUpgrade.Enabled end
+		for _, v in ExtraUpgrades do
+			if v.toggle.Object then v.toggle.Object.Visible = TeamUpgrade.Enabled end
+		end
 	end)
 end)
 

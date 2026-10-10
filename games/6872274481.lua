@@ -2417,8 +2417,8 @@ local function getShopNPC()
     local shop, items, upgrades, newid = nil, false, false, nil
     if entitylib.isAlive then
         local localPosition = entitylib.character.RootPart.Position
-        for _, v in store.shop do
-            if (v.RootPart.Position - localPosition).Magnitude <= 20 then
+        for _, v in (store.shop or {}) do
+            if v.RootPart and v.RootPart.Parent and (v.RootPart.Position - localPosition).Magnitude <= 20 then
                 shop = v.Upgrades or v.Shop or nil
                 upgrades = upgrades or v.Upgrades
                 items = items or v.Shop
@@ -18107,21 +18107,8 @@ run(function()
 		return list
 	end
 
-	local purchaseRemote
-	local function getPurchaseRemote()
-		if not purchaseRemote then
-			purchaseRemote = game:GetService("ReplicatedStorage").rbxts_include.node_modules["@rbxts"].net.out._NetManaged.BedwarsPurchaseItem
-		end
-		return purchaseRemote
-	end
-
 	local upgradeRemote = replicatedStorage:WaitForChild("rbxts_include"):WaitForChild("node_modules"):WaitForChild("@rbxts"):WaitForChild("net"):WaitForChild("out"):WaitForChild("_NetManaged"):WaitForChild("RequestPurchaseTeamUpgrade")
 	local bedUpgradeRemote = replicatedStorage:WaitForChild("rbxts_include"):WaitForChild("node_modules"):WaitForChild("@rbxts"):WaitForChild("net"):WaitForChild("out"):WaitForChild("_NetManaged"):WaitForChild("RequestPurchaseBedTeamUpgrade")
-
-	local function getResourceCount(currency)
-		local item = getItem(currency)
-		return item and item.amount or 0
-	end
 
 	local function playerOwns(itemType)
 		for _, item in store.inventory.inventory.items do
@@ -18171,7 +18158,9 @@ run(function()
 					type = 'BedwarsAddItemPurchased',
 					itemType = item.itemType
 				})
-				bedwars.BedwarsShopController.alreadyPurchasedMap[item.itemType] = true
+				if item.tiered then
+					bedwars.BedwarsShopController.alreadyPurchasedMap[item.itemType] = true
+				end
 			end
 		end):catch(function(err)
 			warn('[AutoBuy] purchase failed: '..tostring(err))
@@ -18190,7 +18179,7 @@ run(function()
 		end
 
 		for i = start, #tools do
-			local v = bedwars.Shop.getShopItem(tools[i], lplr)
+			local v = bedwars.Shop.getShopItem(tools[i], lplr, {shopId = id})
 			if v then
 				if canBuy(v, currencytable) then
 					if SmartCheck.Enabled and (bedwars.ItemMeta[tools[i]] or {}).breakBlock and i > 2 then
@@ -18246,30 +18235,8 @@ run(function()
 	local function buyProjectile(currencytable)
 		if playerOwns('headhunter') or playerOwns('wood_crossbow') or playerOwns('wood_bow') then return end
 
-		for _, v in {
-			{
-				lockAfterPurchase = true, itemType = "headhunter", price = 24,
-				currency = "emerald", amount = 1,
-				disabledInQueue = {"tnt_wars","bedwars_og_to4"}, category = "Combat",
-				spawnWithItems = {"headhunter"},
-				ignoredByKit = {"archer","flower_bee","falconer","nazar"}
-			},
-			{
-				disabledInQueue = {"tnt_wars","bedwars_og_to4"},
-				itemType = "wood_crossbow", price = 7,
-				superiorItems = {"headhunter"}, currency = "emerald",
-				category = "Combat", lockAfterPurchase = true,
-				ignoredByKit = {"archer","flower_bee","falconer","nazar"},
-				spawnWithItems = {"wood_crossbow"}, amount = 1
-			},
-			{
-				ignoredByKit = {"flower_bee","falconer","nazar"},
-				itemType = "wood_bow", price = 24,
-				superiorItems = {"wood_crossbow","tactical_crossbow"},
-				currency = "iron", category = "Combat", lockAfterPurchase = true,
-				spawnWithItems = {"wood_bow"}, amount = 1
-			}
-		} do
+		for _, itemType in {'headhunter', 'wood_crossbow', 'wood_bow'} do
+			local v = bedwars.Shop.getShopItem(itemType, lplr, {shopId = id})
 			if canBuy(v, currencytable) then
 				buyItem(v, currencytable)
 				return
@@ -18281,25 +18248,27 @@ run(function()
 		if not entitylib.isAlive then return nil end
 		local localPosition = entitylib.character.RootPart.Position
 		local shopId
-		for _, v in store.shop do
-			if v.Shop and v.RootPart and (v.RootPart.Position - localPosition).Magnitude <= 20 then
+		for _, v in (store.shop or {}) do
+			if v.Shop and v.RootPart and v.RootPart.Parent and (v.RootPart.Position - localPosition).Magnitude <= 20 then
 				shopId = v.Id
 			end
 		end
 		return shopId
 	end
 
-	local function buyPotion(itemType)
+	local function buyPotion(itemType, currencytable)
 		local shopId = getNearestShopId()
 		if not shopId then return end
 		local ok, item = pcall(function()
 			return bedwars.Shop.getShopItem(itemType, lplr, {shopId = shopId})
 		end)
-		if not ok or not item then return end
-		if getResourceCount(item.currency or 'iron') < (item.price or math.huge) then return end
-		pcall(function()
-			getPurchaseRemote():InvokeServer({shopItem = item, shopId = shopId})
-		end)
+		if not ok then
+			warn('[AutoBuy] potion lookup failed: '..tostring(item))
+			return
+		end
+		if item and canBuy(item, currencytable) then
+			buyItem(item, currencytable, shopId)
+		end
 	end
 
 	local lastBedBarrierBuy = 0
@@ -18395,9 +18364,9 @@ run(function()
 						end
 
 						if WrenShop.Enabled then
-							if BuySerpentToggle.Enabled then buyPotion('serpents_touch_potion') end
-							if BuyJumpToggle.Enabled then buyPotion('jump_potion') end
-							if BuyShieldToggle.Enabled then buyPotion('mini_shield') end
+							if BuySerpentToggle.Enabled then buyPotion('serpents_touch_potion', currencytable) end
+							if BuyJumpToggle.Enabled then buyPotion('jump_potion', currencytable) end
+							if BuyShieldToggle.Enabled then buyPotion('mini_shield', currencytable) end
 						end
 
 						if canItems then
@@ -18521,12 +18490,14 @@ run(function()
 				local ind = tonumber(tab[1])
 				if ind and tab[2] then
 					(tab[4] and CustomPost or Custom)[ind] = function(currencytable)
-						local v = bedwars.Shop.getShopItem(tab[2], lplr)
+						local v = bedwars.Shop.getShopItem(tab[2], lplr, {shopId = id})
 						if not v then return end
 						local amount = tonumber(tab[3]) or 1
 						local woolName = (tab[2] == 'wool_white' and bedwars.Shop.getTeamWool) and bedwars.Shop.getTeamWool(lplr:GetAttribute('Team')) or tab[2]
 						local item = getItem(woolName or tab[2])
-						local count = (item and (amount - item.amount) or amount) // (v.amount or 1)
+						local bundle = v.amount or 1
+						if bundle <= 0 or amount <= 0 or amount ~= amount or amount == math.huge then return end
+						local count = math.ceil(math.max(amount - (item and item.amount or 0), 0) / bundle)
 						if count > 0 and canBuy(v, currencytable, count) then
 							for _ = 1, count do
 								buyItem(v, currencytable)

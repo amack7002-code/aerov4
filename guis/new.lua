@@ -9481,11 +9481,19 @@ hudKeystrokes = hudOverlay:CreateToggle({
 	Function = function() refreshHUD() end
 })
 
-local fpsFrames, fpsCurrent, fpsTimer = 0, 0, tick()
+local fpsFrames, fpsCurrent, fpsElapsed = 0, 0, 0
+mainapi:Clean(runService.RenderStepped:Connect(function(dt)
+	fpsFrames += 1
+	fpsElapsed += dt
+	if fpsElapsed >= 1 then
+		fpsCurrent = math.round(fpsFrames / fpsElapsed)
+		fpsFrames, fpsElapsed = 0, 0
+	end
+end))
 local activeKeys = {}
 
-mainapi:Clean(inputService.InputBegan:Connect(function(inputObj)
-	if not (hudKeystrokes and hudKeystrokes.Enabled) then return end
+mainapi:Clean(inputService.InputBegan:Connect(function(inputObj, processed)
+	if processed or inputService:GetFocusedTextBox() or not (hudKeystrokes and hudKeystrokes.Enabled) then return end
 	if inputObj.UserInputType == Enum.UserInputType.Keyboard then
 		local name = inputObj.KeyCode.Name
 		if #name <= 10 then activeKeys[name] = true end
@@ -9506,15 +9514,16 @@ mainapi:Clean(inputService.InputEnded:Connect(function(inputObj)
 	end
 end))
 
+mainapi:Clean(inputService.WindowFocusReleased:Connect(function()
+	table.clear(activeKeys)
+end))
+
 local hudSlowTimer = 0
 local hudLastFPS, hudLastPing, hudLastClock, hudLastKeys
 mainapi:Clean(runService.Heartbeat:Connect(function()
-	fpsFrames += 1
 	local now = tick()
-	if now - fpsTimer >= 1 then
-		fpsCurrent = fpsFrames
-		fpsFrames = 0
-		fpsTimer = now
+	if not (hudKeystrokes and hudKeystrokes.Enabled) or inputService:GetFocusedTextBox() then
+		table.clear(activeKeys)
 	end
 
 	if not hudFrame.Visible then return end
@@ -9526,6 +9535,7 @@ mainapi:Clean(runService.Heartbeat:Connect(function()
 	if hudKeystrokes and hudKeystrokes.Enabled then
 		local keys = {}
 		for k in activeKeys do table.insert(keys, k) end
+		table.sort(keys)
 		local val = #keys > 0 and table.concat(keys, ' + ') or 'Keys  --'
 		if hudLastKeys ~= val then
 			hudLastKeys = val
@@ -9538,7 +9548,9 @@ mainapi:Clean(runService.Heartbeat:Connect(function()
 
 	if hudPing and hudPing.Enabled then
 		local ok, ping = pcall(function()
-			return math.round(hudLplr:GetNetworkPing() * 1000)
+			local value = hudLplr:GetNetworkPing()
+			if type(value) ~= 'number' or value ~= value or value < 0 or value == math.huge then return nil end
+			return math.round(value * 1000)
 		end)
 		local val = ok and ping or '--'
 		if hudLastPing ~= val then
@@ -9547,7 +9559,9 @@ mainapi:Clean(runService.Heartbeat:Connect(function()
 		end
 	end
 	if hudClock and hudClock.Enabled then
-		local ok, t = pcall(os.date, '%I:%M %p')
+		local ok, t = pcall(function()
+			return DateTime.now():FormatLocalTime('LT', 'en-us')
+		end)
 		local val = ok and t or '--:--'
 		if hudLastClock ~= val then
 			hudLastClock = val

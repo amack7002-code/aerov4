@@ -6992,10 +6992,16 @@ run(function()
 		Name = 'Clock',
 		Function = function(callback)
 			if callback then
-				repeat
-					label.Text = DateTime.now():FormatLocalTime('LT', TwentyFourHour.Enabled and 'zh-cn' or 'en-us')
-					task.wait(1)
-				until not Clock.Enabled
+				local elapsed = 1
+				Clock:Clean(runService.Heartbeat:Connect(function(dt)
+					elapsed += dt
+					if not Clock.Enabled or not label or not TwentyFourHour or elapsed < 1 then return end
+					elapsed = 0
+					local ok, text = pcall(function()
+						return DateTime.now():FormatLocalTime('LT', TwentyFourHour.Enabled and 'zh-cn' or 'en-us')
+					end)
+					label.Text = ok and text or '--:--'
+				end))
 			end
 		end,
 		Size = UDim2.fromOffset(100, 41),
@@ -7005,7 +7011,7 @@ run(function()
 		Name = 'Font',
 		Blacklist = 'Gotham',
 		Function = function(val)
-			label.FontFace = val
+			if label then label.FontFace = val end
 		end
 	})
 	Clock:CreateColorSlider({
@@ -7013,8 +7019,10 @@ run(function()
 		DefaultValue = 0,
 		DefaultOpacity = 0.5,
 		Function = function(hue, sat, val, opacity)
-			label.BackgroundColor3 = Color3.fromHSV(hue, sat, val)
-			label.BackgroundTransparency = 1 - opacity
+			if label then
+				label.BackgroundColor3 = Color3.fromHSV(hue, sat, val)
+				label.BackgroundTransparency = 1 - opacity
+			end
 		end
 	})
 	TwentyFourHour = Clock:CreateToggle({
@@ -7214,18 +7222,14 @@ run(function()
 		Name = 'FPS',
 		Function = function(callback)
 			if callback then
-				local frames = {}
-				local startClock = os.clock()
-				local updateTick = tick()
-				FPS:Clean(runService.Heartbeat:Connect(function()
-					local updateClock = os.clock()
-					for i = #frames, 1, -1 do
-						frames[i + 1] = frames[i] >= updateClock - 1 and frames[i] or nil
-					end
-					frames[1] = updateClock
-					if updateTick < tick() then
-						updateTick = tick() + 1
-						label.Text = math.floor(os.clock() - startClock >= 1 and #frames or #frames / (os.clock() - startClock))..' FPS'
+				local frames, elapsed = 0, 0
+				FPS:Clean(runService.RenderStepped:Connect(function(dt)
+					if not FPS.Enabled then return end
+					frames += 1
+					elapsed += dt
+					if label and elapsed >= 1 then
+						label.Text = math.round(frames / elapsed)..' FPS'
+						frames, elapsed = 0, 0
 					end
 				end))
 			end
@@ -7237,7 +7241,7 @@ run(function()
 		Name = 'Font',
 		Blacklist = 'Gotham',
 		Function = function(val)
-			label.FontFace = val
+			if label then label.FontFace = val end
 		end
 	})
 	FPS:CreateColorSlider({
@@ -7245,8 +7249,10 @@ run(function()
 		DefaultValue = 0,
 		DefaultOpacity = 0.5,
 		Function = function(hue, sat, val, opacity)
-			label.BackgroundColor3 = Color3.fromHSV(hue, sat, val)
-			label.BackgroundTransparency = 1 - opacity
+			if label then
+				label.BackgroundColor3 = Color3.fromHSV(hue, sat, val)
+				label.BackgroundTransparency = 1 - opacity
+			end
 		end
 	})
 	label = Instance.new('TextLabel')
@@ -7407,10 +7413,17 @@ run(function()
 		Name = 'Memory',
 		Function = function(callback)
 			if callback then
-				repeat
-					label.Text = math.floor(tonumber(game:GetService('Stats'):FindFirstChild('PerformanceStats').Memory:GetValue()))..' MB'
-					task.wait(1)
-				until not Memory.Enabled
+				local elapsed = 1
+				Memory:Clean(runService.Heartbeat:Connect(function(dt)
+					elapsed += dt
+					if not Memory.Enabled or not label or elapsed < 1 then return end
+					elapsed = 0
+					local ok, value = pcall(function()
+						return game:GetService('Stats'):GetTotalMemoryUsageMb()
+					end)
+					label.Text = ok and type(value) == 'number' and value == value
+						and value >= 0 and value < math.huge and (math.round(value)..' MB') or '-- MB'
+				end))
 			end
 		end,
 		Size = UDim2.fromOffset(100, 41),
@@ -7420,7 +7433,7 @@ run(function()
 		Name = 'Font',
 		Blacklist = 'Gotham',
 		Function = function(val)
-			label.FontFace = val
+			if label then label.FontFace = val end
 		end
 	})
 	Memory:CreateColorSlider({
@@ -7428,8 +7441,10 @@ run(function()
 		DefaultValue = 0,
 		DefaultOpacity = 0.5,
 		Function = function(hue, sat, val, opacity)
-			label.BackgroundColor3 = Color3.fromHSV(hue, sat, val)
-			label.BackgroundTransparency = 1 - opacity
+			if label then
+				label.BackgroundColor3 = Color3.fromHSV(hue, sat, val)
+				label.BackgroundTransparency = 1 - opacity
+			end
 		end
 	})
 	label = Instance.new('TextLabel')
@@ -7454,10 +7469,15 @@ run(function()
 		Name = 'Ping',
 		Function = function(callback)
 			if callback then
-				repeat
-					label.Text = math.floor(tonumber(game:GetService('Stats'):FindFirstChild('PerformanceStats').Ping:GetValue()))..' ms'
-					task.wait(1)
-				until not Ping.Enabled
+				local elapsed = 1
+				Ping:Clean(runService.Heartbeat:Connect(function(dt)
+					elapsed += dt
+					if not Ping.Enabled or not label or elapsed < 1 then return end
+					elapsed = 0
+					local ok, value = pcall(function() return lplr:GetNetworkPing() end)
+					label.Text = ok and type(value) == 'number' and value == value
+						and value >= 0 and value < math.huge and (math.round(value * 1000)..' ms') or '-- ms'
+				end))
 			end
 		end,
 		Size = UDim2.fromOffset(100, 41),
@@ -7467,7 +7487,7 @@ run(function()
 		Name = 'Font',
 		Blacklist = 'Gotham',
 		Function = function(val)
-			label.FontFace = val
+			if label then label.FontFace = val end
 		end
 	})
 	Ping:CreateColorSlider({
@@ -7475,8 +7495,10 @@ run(function()
 		DefaultValue = 0,
 		DefaultOpacity = 0.5,
 		Function = function(hue, sat, val, opacity)
-			label.BackgroundColor3 = Color3.fromHSV(hue, sat, val)
-			label.BackgroundTransparency = 1 - opacity
+			if label then
+				label.BackgroundColor3 = Color3.fromHSV(hue, sat, val)
+				label.BackgroundTransparency = 1 - opacity
+			end
 		end
 	})
 	label = Instance.new('TextLabel')
@@ -7501,12 +7523,28 @@ run(function()
 		Name = 'Speedmeter',
 		Function = function(callback)
 			if callback then
-				repeat
-					local lastpos = entitylib.isAlive and entitylib.character.HumanoidRootPart.Position * Vector3.new(1, 0, 1) or Vector3.zero
-					local dt = task.wait(0.2)
-					local newpos = entitylib.isAlive and entitylib.character.HumanoidRootPart.Position * Vector3.new(1, 0, 1) or Vector3.zero
-					label.Text = math.round(((lastpos - newpos) / dt).Magnitude)..' sps'
-				until not Speedmeter.Enabled
+				local lastRoot, lastPosition, elapsed
+				elapsed = 0
+				Speedmeter:Clean(runService.Heartbeat:Connect(function(dt)
+					if not Speedmeter.Enabled or not label then return end
+					local character = entitylib.isAlive and entitylib.character
+					local root = character and character.RootPart
+					if not root or not root.Parent then
+						lastRoot, lastPosition, elapsed = nil, nil, 0
+						label.Text = '0 sps'
+						return
+					end
+					local position = root.Position * Vector3.new(1, 0, 1)
+					if root ~= lastRoot then
+						lastRoot, lastPosition, elapsed = root, position, 0
+						label.Text = '0 sps'
+						return
+					end
+					elapsed += dt
+					if elapsed < 0.2 then return end
+					label.Text = math.round((position - lastPosition).Magnitude / elapsed)..' sps'
+					lastPosition, elapsed = position, 0
+				end))
 			end
 		end,
 		Size = UDim2.fromOffset(100, 41),
@@ -7516,7 +7554,7 @@ run(function()
 		Name = 'Font',
 		Blacklist = 'Gotham',
 		Function = function(val)
-			label.FontFace = val
+			if label then label.FontFace = val end
 		end
 	})
 	Speedmeter:CreateColorSlider({
@@ -7524,8 +7562,10 @@ run(function()
 		DefaultValue = 0,
 		DefaultOpacity = 0.5,
 		Function = function(hue, sat, val, opacity)
-			label.BackgroundColor3 = Color3.fromHSV(hue, sat, val)
-			label.BackgroundTransparency = 1 - opacity
+			if label then
+				label.BackgroundColor3 = Color3.fromHSV(hue, sat, val)
+				label.BackgroundTransparency = 1 - opacity
+			end
 		end
 	})
 	label = Instance.new('TextLabel')
@@ -7959,18 +7999,46 @@ run(function()
     local waterLayer
     local generation = 0
 
-    local function findLowestBlock()
-        local lowest = nil
+    local function findMapSurface()
+        local lowest, minX, maxX, minZ, maxZ
         for _, v in collectionService:GetTagged('block') do
-            if v and v:IsA('BasePart') then
-                local y = v.Position.Y
-                if not lowest or y < lowest then
-                    lowest = y
-                end
+            if v and v.Parent and v:IsA('BasePart') and v:IsDescendantOf(workspace) then
+                local pos = v.Position
+                lowest = math.min(lowest or pos.Y, pos.Y)
+                minX, maxX = math.min(minX or pos.X, pos.X), math.max(maxX or pos.X, pos.X)
+                minZ, maxZ = math.min(minZ or pos.Z, pos.Z), math.max(maxZ or pos.Z, pos.Z)
             end
         end
         if not lowest then return nil end
-        return lowest - 7
+        return CFrame.new((minX + maxX) / 2, lowest - 7, (minZ + maxZ) / 2)
+    end
+
+    local function refreshSurface()
+        if not WaterAmbient.Enabled then return end
+        local surface = findMapSurface()
+        if waterLayer and waterLayer.Parent == workspace then
+            if surface then waterLayer.CFrame = surface end
+            return
+        end
+        if waterLayer then waterLayer:Destroy() end
+        local layer = Instance.new('Part')
+        layer.Name = 'WaterAmbientLayer'
+        layer.Anchored = true
+        layer.CanCollide = false
+        layer.CanTouch = false
+        layer.CanQuery = false
+        layer.CastShadow = false
+        layer.Material = Enum.Material.Glass
+        layer.Size = Vector3.new(2048, 0.05, 2048)
+        local character = entitylib.isAlive and entitylib.character
+        local pos = character and character.RootPart and character.RootPart.Position
+        layer.CFrame = surface or CFrame.new(pos and pos.X or 0, -20, pos and pos.Z or 0)
+        layer.Color = WaterColor and Color3.fromHSV(WaterColor.Hue, WaterColor.Sat, WaterColor.Value)
+            or Color3.fromRGB(0, 170, 255)
+        layer.Transparency = 0.25
+        layer.Reflectance = 0.7
+        layer.Parent = workspace
+        waterLayer = layer
     end
 
     WaterAmbient = vape.Categories.World:CreateModule({
@@ -7980,33 +8048,24 @@ run(function()
             generation += 1
             local currentGeneration = generation
             if callback then
-                local y
-                for _ = 1, 40 do
+                -- Refresh after loading/respawn and recover if the map removes the layer.
+                -- Decorative only: never overwrite terrain or change swimming state.
+                refreshSurface()
+                local elapsed = 0
+                WaterAmbient:Clean(runService.Heartbeat:Connect(function(dt)
                     if not WaterAmbient.Enabled or generation ~= currentGeneration then return end
-                    y = findLowestBlock()
-                    if y then break end
-                    task.wait(0.25)
-                end
-                if not WaterAmbient.Enabled or generation ~= currentGeneration then return end
-                -- Decorative only: never overwrite terrain voxels or change swimming state.
-                local layer = Instance.new('Part')
-                layer.Name = 'WaterAmbientLayer'
-                layer.Anchored = true
-                layer.CanCollide = false
-                layer.CanTouch = false
-                layer.CanQuery = false
-                layer.CastShadow = false
-                layer.Material = Enum.Material.Glass
-                layer.Size = Vector3.new(2048, 0.05, 2048)
-                layer.CFrame = CFrame.new(0, y or -20, 0)
-                layer.Color = Color3.fromHSV(WaterColor.Hue, WaterColor.Sat, WaterColor.Value)
-                layer.Transparency = 0.25
-                layer.Reflectance = 0.7
-                layer.Parent = workspace
-                waterLayer = layer
+                    elapsed += dt
+                    if elapsed < 1 then return end
+                    elapsed = 0
+                    refreshSurface()
+                end))
+                WaterAmbient:Clean(entitylib.Events.LocalAdded:Connect(function()
+                    if WaterAmbient.Enabled and generation == currentGeneration then refreshSurface() end
+                end))
                 WaterAmbient:Clean(function()
-                    layer:Destroy()
-                    if waterLayer == layer then waterLayer = nil end
+                    if generation ~= currentGeneration then return end
+                    if waterLayer then waterLayer:Destroy() end
+                    waterLayer = nil
                 end)
             elseif waterLayer then
                 waterLayer:Destroy()

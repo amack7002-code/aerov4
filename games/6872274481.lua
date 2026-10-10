@@ -16560,6 +16560,7 @@ run(function()
 	local SCORE_DECAY = 1.2
 	local REASON_LIFE = 25
 	local REASON_COOLDOWN = 6
+	local TELEPORT_GRACE = 1.5
 
 	local tips = {
 		Speed = 'catches ppl movin way too fast',
@@ -16665,12 +16666,29 @@ run(function()
 		end
 	end
 
+	local function recentlyTeleported(plr)
+		local m = meta[plr]
+		if m and os.clock() < (m.teleportUntil or 0) then return true end
+		local lastTeleported = plr:GetAttribute('LastTeleported') or 0
+		return workspace:GetServerTimeNow() - lastTeleported < TELEPORT_GRACE
+	end
+
 	local function trackMeta(plr, ent)
 		local now = os.clock()
 		local m = meta[plr]
+		local teleportStamp = plr:GetAttribute('LastTeleported') or 0
 		if not m then
-			m = {spawn = now, lastMove = now, lastDamaged = 0, char = ent.Character}
+			m = {spawn = now, lastMove = now, lastDamaged = 0, char = ent.Character, lastTeleport = teleportStamp}
 			meta[plr] = m
+		end
+		if m.lastTeleport ~= teleportStamp then
+			m.lastTeleport = teleportStamp
+			m.teleportUntil = now + TELEPORT_GRACE
+			history[plr] = nil
+			reachStreak[plr] = nil
+			airTime[plr] = nil
+			speedTime[plr] = nil
+			kaData[plr] = nil
 		end
 		if m.char ~= ent.Character then
 			m.char = ent.Character
@@ -16706,20 +16724,23 @@ run(function()
 		if not m then return false end
 		local now = os.clock()
 		if now - m.spawn < 3 then return false end
-		if now - m.lastMove > 0.35 then return false end
 		local hum = getHumanoid(ent)
 		if not hum or hum.Health <= 0 then return false end
 		if (char:GetAttribute('InflatedBalloons') or 0) > 0 then return false end
+		if recentlyTeleported(plr) then return false end
 		local serverNow = workspace:GetServerTimeNow()
-		if serverNow - (plr:GetAttribute('LastTeleported') or 0) < 1.5 then return false end
 		local stun = char:GetAttribute('StunnedUntilTime')
 		if stun and stun > serverNow - 1 then return false end
-		local dashNext = char:GetAttribute('CanDashNext')
-		if dashNext and dashNext > serverNow then return false end
 		if lplr:GetNetworkPing() > 0.15 then return false end
 		local h = history[plr]
 		if not h or #h < 8 then return false end
 		return true
+	end
+
+	local function movementTrusted(plr, ent)
+		if not trusted(plr, ent) then return false end
+		local m = meta[plr]
+		return m and os.clock() - m.lastMove <= 0.35
 	end
 
 	local function minDistanceTo(plr, point, window)
@@ -16773,12 +16794,11 @@ run(function()
 	local function getAttackRange(plr)
 		local inv = store.inventories[plr]
 		local hand = inv and inv.hand
-		local name = hand and hand.tool and hand.tool.Name
+		local name = hand and (hand.itemType or (hand.tool and hand.tool.Name))
 		if not name then return nil end
 		local itemMeta = bedwars.ItemMeta[name]
 		local swordMeta = itemMeta and itemMeta.sword
-		if not swordMeta then return nil end
-		return swordMeta.attackRange
+		return (swordMeta and swordMeta.attackRange) or 14.4
 	end
 
 	local function blockedByMap(fromPos, toPos)
@@ -16814,28 +16834,32 @@ run(function()
 		if not range then return end
 
 		local best
-		if fromPosition then
-			if victimPlr then
-				best = minDistanceTo(victimPlr, fromPosition, 0.8)
-			elseif victimPos then
+		if typeof(fromPosition) == 'Vector3' then
+			if victimPos then
 				best = (victimPos - fromPosition).Magnitude
+			elseif victimPlr then
+				best = minDistanceTo(victimPlr, fromPosition, 0.8)
 			end
 		end
-		if victimPlr then
-			local paired = minPairDistance(attacker, victimPlr, 0.8)
-			if paired and (not best or paired < best) then best = paired end
+		if not best and victimPlr then
+			best = minPairDistance(attacker, victimPlr, 0.8)
 		end
 		if not best then return end
 
 		local allowance = range + 2.5 + math.min(lplr:GetNetworkPing(), 0.2) * 30
 		if best > allowance then
-			reachStreak[attacker] = (reachStreak[attacker] or 0) + 1
-			if reachStreak[attacker] >= 3 then
-				reachStreak[attacker] = 0
+			local now = os.clock()
+			local streak = reachStreak[attacker] or {count = 0, last = 0}
+			if now - streak.last > 2 then streak.count = 0 end
+			streak.count += 1
+			streak.last = now
+			reachStreak[attacker] = streak
+			if streak.count >= 3 then
+				reachStreak[attacker] = nil
 				addScore(attacker, 45, 'reach', 'reach ('..string.format('%.1f', best)..' studs, max is '..string.format('%.1f', allowance)..')')
 			end
 		else
-			reachStreak[attacker] = 0
+			reachStreak[attacker] = nil
 		end
 	end
 
@@ -16847,14 +16871,14 @@ run(function()
 		d.targets[victimInstance] = now
 		local distinct = 0
 		for inst, t in d.targets do
-			if now - t <= 0.35 then
+			if now - t <= 0.15 then
 				distinct = distinct + 1
 			else
 				d.targets[inst] = nil
 			end
 		end
-		if distinct >= 2 then
-			addScore(attacker, 40, 'multi', 'killaura (hit '..distinct..' ppl at once)')
+		if distinct >= 3 then
+			addScore(attacker, 40, 'multi', 'killaura (hit '..distinct..' ppl within 0.15s)')
 		end
 
 		if d.lastHit > 0 then
@@ -16864,14 +16888,14 @@ run(function()
 				while #d.intervals > 16 do
 					table.remove(d.intervals, 1)
 				end
-				if #d.intervals >= 12 then
+				if #d.intervals >= 16 then
 					local sum = 0
 					for _, g in d.intervals do sum = sum + g end
 					local mean = sum / #d.intervals
 					local varSum = 0
 					for _, g in d.intervals do varSum = varSum + (g - mean) ^ 2 end
 					local sd = math.sqrt(varSum / #d.intervals)
-					if mean > 0.05 and sd / mean < 0.07 then
+					if mean > 0.05 and mean < 0.25 and sd / mean < 0.04 then
 						addScore(attacker, 45, 'timing', 'killaura (hits perfectly on beat, no human jitter)')
 						table.clear(d.intervals)
 					end
@@ -16881,7 +16905,7 @@ run(function()
 		d.lastHit = now
 
 		local attackerSample = recentSample(attacker)
-		local origin = attackerSample and attackerSample.pos or fromPosition
+		local origin = typeof(fromPosition) == 'Vector3' and fromPosition or attackerSample and attackerSample.pos
 		local look = attackerSample and attackerSample.look
 		local targetPos = victimPos
 		if victimPlr then
@@ -16933,6 +16957,11 @@ run(function()
 		local am = meta[attacker]
 		if not am or os.clock() - am.spawn < 3 then return end
 		if lplr:GetNetworkPing() > 0.15 then return end
+		if recentlyTeleported(attacker) or (victimPlr and recentlyTeleported(victimPlr)) then
+			reachStreak[attacker] = nil
+			kaData[attacker] = nil
+			return
+		end
 
 		checkReach(attacker, victimPlr, victimPos, dmg.fromPosition)
 		checkKillaura(attacker, dmg.entityInstance, victimPlr, victimPos, dmg.fromPosition)
@@ -16946,15 +16975,25 @@ run(function()
 		local root = ent.RootPart
 		rayParams.FilterDescendantsInstances = {ent.Character, lplr.Character, gameCamera}
 		local hit = workspace:Raycast(root.Position, Vector3.new(0, -250, 0), rayParams)
-		local groundDist = hit and (root.Position.Y - hit.Position.Y) or 250
+		if not hit then
+			airTime[plr] = 0
+			return
+		end
+		local groundDist = root.Position.Y - hit.Position.Y
 		local vel = root.AssemblyLinearVelocity
-		local horizontal = (vel * Vector3.new(1, 0, 1)).Magnitude
+		local m = meta[plr]
+		if m and os.clock() - (m.lastDamaged or 0) < 1.5 then
+			airTime[plr] = 0
+			return
+		end
 
-		if groundDist > 8 and math.abs(vel.Y) < 3 and horizontal > 2 then
+		local hovering = math.abs(vel.Y) < 3
+		local rising = vel.Y > 3
+		if groundDist > 10 and (hovering or rising) then
 			airTime[plr] = (airTime[plr] or 0) + dt
-			if airTime[plr] >= 1.75 then
+			if airTime[plr] >= 2.25 then
 				airTime[plr] = 0
-				addScore(plr, 50, 'fly', 'fly (hoverin '..math.floor(groundDist)..' studs off the ground)')
+				addScore(plr, 50, 'fly', 'fly (sustained airborne movement, '..math.floor(groundDist)..' studs above ground)')
 			end
 		else
 			airTime[plr] = 0
@@ -16980,6 +17019,7 @@ run(function()
 		local now = os.clock()
 		local newest, oldest, prev
 		local maxStep = 0
+		local travelled = 0
 		for i = #h, 1, -1 do
 			local s = h[i]
 			if now - s.t > 0.5 then break end
@@ -16987,6 +17027,7 @@ run(function()
 			if prev then
 				local step = ((prev.pos - s.pos) * Vector3.new(1, 0, 1)).Magnitude
 				if step > maxStep then maxStep = step end
+				travelled += step
 			end
 			prev = s
 			oldest = s
@@ -17002,7 +17043,6 @@ run(function()
 			return
 		end
 
-		local travelled = ((newest.pos - oldest.pos) * Vector3.new(1, 0, 1)).Magnitude
 		local speed = travelled / span
 		if speed > 34 then
 			speedTime[plr] = (speedTime[plr] or 0) + dt
@@ -17065,7 +17105,11 @@ run(function()
 								pushSample(plr, ent)
 								if trusted(plr, ent) then
 									checkFly(plr, ent, dt, rayParams)
-									checkSpeed(plr, ent, dt)
+									if movementTrusted(plr, ent) then
+										checkSpeed(plr, ent, dt)
+									else
+										speedTime[plr] = 0
+									end
 								else
 									airTime[plr] = 0
 									speedTime[plr] = 0
